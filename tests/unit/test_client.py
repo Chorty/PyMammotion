@@ -906,6 +906,9 @@ async def test_poll_loop_rate_limited_no_ble_backs_off() -> None:
     handle = make_handle("dev1", "Luba-RL3")
     mqtt = _make_connected_transport(TransportType.CLOUD_ALIYUN)
     mqtt.is_rate_limited = True
+    # The loop now backs off only until sends are available again; a full cloud ban still
+    # caps at _RATE_LIMITED_BACKOFF.
+    mqtt.seconds_until_send_available = MagicMock(return_value=_RATE_LIMITED_BACKOFF)
     await handle.add_transport(mqtt)
 
     sleep_seconds: list[float] = []
@@ -924,7 +927,31 @@ async def test_poll_loop_rate_limited_no_ble_backs_off() -> None:
         await asyncio.wait_for(mqtt_activity_loop(handle), timeout=2.0)
 
     one_shot_mock.assert_not_awaited()
-    assert any(s >= _RATE_LIMITED_BACKOFF for s in sleep_seconds)
+    assert sleep_seconds == [_RATE_LIMITED_BACKOFF]
+
+
+async def test_poll_loop_rate_limited_backoff_shortens_to_window_release() -> None:
+    """The backoff resumes as soon as the rolling window will clear, not a flat 12 h."""
+    handle = make_handle("dev1", "Luba-RL4")
+    mqtt = _make_connected_transport(TransportType.CLOUD_ALIYUN)
+    mqtt.is_rate_limited = True
+    mqtt.seconds_until_send_available = MagicMock(return_value=300.0)  # window clears in 5 min
+    await handle.add_transport(mqtt)
+
+    sleep_seconds: list[float] = []
+
+    async def _record_sleep(s: float) -> bool:
+        sleep_seconds.append(s)
+        handle._stopping = True  # noqa: SLF001
+        return False
+
+    with (
+        patch.object(handle, "sleep_or_rearm", AsyncMock(side_effect=_record_sleep)),
+        patch.object(handle, "_send_one_shot_report", AsyncMock()),
+    ):
+        await asyncio.wait_for(mqtt_activity_loop(handle), timeout=2.0)
+
+    assert sleep_seconds == [300.0]  # not _RATE_LIMITED_BACKOFF
 
 
 async def test_poll_loop_rate_limited_with_ble_still_polls() -> None:

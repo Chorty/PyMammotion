@@ -10,7 +10,12 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
-from pymammotion.aliyun.exceptions import DeviceOfflineException, DeviceUnboundException, TooManyRequestsException
+from pymammotion.aliyun.exceptions import (
+    DeviceOfflineException,
+    DeviceUnboundException,
+    GatewayTimeoutException,
+    TooManyRequestsException,
+)
 from pymammotion.transport import TransportError
 from pymammotion.transport.base import (
     AuthError,
@@ -260,8 +265,6 @@ class DeviceCommandQueue:
                 # (e-stop, return-to-dock) bypass the gate unconditionally.
                 if item.priority > Priority.EMERGENCY:
                     await self._transport_gate.wait()
-
-                from pymammotion.aliyun.exceptions import GatewayTimeoutException
 
                 _gateway_timeout_max = 3
                 for _attempt in range(1, _gateway_timeout_max + 1):

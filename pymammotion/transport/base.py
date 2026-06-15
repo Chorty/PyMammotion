@@ -257,10 +257,10 @@ class Transport(ABC):
 
     #: Duration of the rate-limit ban in seconds (12 hours).
     _RATE_LIMIT_DURATION: float = 43200.0
-    #: Rolling window for the outbound send counter (24 hours).
-    _SEND_WINDOW: float = 86400.0
+    #: Rolling window for the outbound send counter (12 hours).
+    _SEND_WINDOW: float = 43200.0
     #: Maximum sends allowed within _SEND_WINDOW before self-imposing rate limiting.
-    _SEND_LIMIT: int = 300
+    _SEND_LIMIT: int = 600
 
     def __init__(self) -> None:
         """Initialise the availability listener list and error window."""
@@ -268,10 +268,15 @@ class Transport(ABC):
         self._error_timestamps: collections.deque[float] = collections.deque()
         self._last_received_monotonic: float = 0.0
         self._on_message: Callable[[bytes], Awaitable[None]] | None = None
-        #: Monotonic timestamp after which the rate-limit ban expires (0 = not banned).
+        #: Monotonic timestamp after which a *cloud-imposed* (429) rate-limit ban expires
+        #: (0 = not banned).  The self-imposed quota is NOT tracked here — it is derived
+        #: live from the rolling window so it self-clears the instant the count drops back
+        #: under _SEND_LIMIT.
         self._rate_limited_until: float = 0.0
-        #: Rolling log of outbound send timestamps for the 24-hour send budget.
+        #: Rolling log of outbound send timestamps for the _SEND_WINDOW send budget.
         self._send_timestamps: collections.deque[float] = collections.deque()
+        #: Edge-trigger flag so the quota-exhaustion warning logs once per entry, not per send.
+        self._quota_warned: bool = False
         #: Monotonic timestamp of the most recent outbound send (0.0 = never sent).
         self._last_send_monotonic: float = 0.0
         #: Set by mark_auth_failed() when a send fails with ReLoginRequiredError.
@@ -363,8 +368,40 @@ class Transport(ABC):
 
     @property
     def is_rate_limited(self) -> bool:
-        """True when the cloud has rate-limited this transport and the ban has not yet expired."""
-        return time.monotonic() < self._rate_limited_until
+        """True when a send is currently blocked, from either of two independent sources:
+
+        * **Cloud-imposed ban** — the cloud returned 429; ``set_rate_limited()`` set a fixed
+          ``_RATE_LIMIT_DURATION`` timer that has not yet expired.
+        * **Self-imposed quota** — the rolling send window currently holds ``>= _SEND_LIMIT``
+          sends.  This is computed live, so it releases the moment enough of the oldest sends
+          age out of the window — no fixed wait once back under the limit.
+        """
+        if time.monotonic() < self._rate_limited_until:
+            return True
+        return self.sends_in_window() >= self._SEND_LIMIT
+
+    def seconds_until_send_available(self) -> float:
+        """Seconds until a send would be allowed again (``0.0`` if allowed right now).
+
+        Returns the larger of the cloud-ban remaining time and the self-imposed quota
+        release time.  The quota release is the moment just enough of the oldest in-window
+        sends age out that the count drops back under ``_SEND_LIMIT`` — so callers that back
+        off by this value (e.g. the poll loop) resume the instant the window slides under,
+        instead of waiting a flat ``_RATE_LIMIT_DURATION``.
+        """
+        now = time.monotonic()
+        cloud_remaining = max(0.0, self._rate_limited_until - now)
+
+        cutoff = now - self._SEND_WINDOW
+        in_window = [ts for ts in self._send_timestamps if ts >= cutoff]  # ascending (append order)
+        quota_remaining = 0.0
+        if len(in_window) >= self._SEND_LIMIT:
+            # Age out (count - _SEND_LIMIT + 1) of the oldest so the count becomes
+            # _SEND_LIMIT - 1.  That happens once in_window[idx] leaves the window.
+            idx = len(in_window) - self._SEND_LIMIT
+            quota_remaining = max(0.0, in_window[idx] + self._SEND_WINDOW - now)
+
+        return max(cloud_remaining, quota_remaining)
 
     @property
     def is_usable(self) -> bool:
@@ -387,11 +424,12 @@ class Transport(ABC):
         self._rate_limited_until = time.monotonic() + self._RATE_LIMIT_DURATION
 
     def record_send(self) -> None:
-        """Record one outbound send and self-impose rate limiting if the 24-hour budget is exhausted.
+        """Record one outbound send against the rolling send-window quota.
 
         Call this from MQTT transport send() implementations only — BLE has no cloud quota.
-        When the rolling count hits _SEND_LIMIT within _SEND_WINDOW seconds, set_rate_limited()
-        is called automatically so the next send attempt is blocked immediately.
+        No fixed-duration ban is imposed here: ``is_rate_limited`` derives the self-imposed
+        quota block live from the rolling window, so sends resume automatically as soon as
+        enough of the oldest entries age out and the count drops back under ``_SEND_LIMIT``.
         """
         now = time.monotonic()
         self._last_send_monotonic = now
@@ -400,14 +438,17 @@ class Transport(ABC):
         while self._send_timestamps and self._send_timestamps[0] < cutoff:
             self._send_timestamps.popleft()
         if len(self._send_timestamps) >= self._SEND_LIMIT:
-            if not self.is_rate_limited:
+            if not self._quota_warned:
+                self._quota_warned = True
                 _logger.warning(
-                    "%s: %d sends in %.0f h — self-imposing rate limit",
+                    "%s: %d sends in %.0f h — throttling until the rolling window drops back under %d",
                     type(self).__name__,
                     len(self._send_timestamps),
                     self._SEND_WINDOW / 3600,
+                    self._SEND_LIMIT,
                 )
-            self.set_rate_limited()
+        else:
+            self._quota_warned = False
 
     def sends_in_window(self) -> int:
         """Return the number of sends recorded in the current 24-hour rolling window."""

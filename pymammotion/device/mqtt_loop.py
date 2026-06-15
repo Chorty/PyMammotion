@@ -147,12 +147,18 @@ async def mqtt_activity_loop(handle: DeviceHandle) -> None:
         if mqtt is not None and mqtt.is_rate_limited:
             ble = handle._transports.get(TransportType.BLE)  # noqa: SLF001
             if ble is None or not ble.is_connected:
+                # Back off only until sends are actually available again (the rolling
+                # window sliding under the limit, or the cloud ban expiring) so the loop
+                # resumes promptly instead of sleeping a flat _RATE_LIMITED_BACKOFF.
+                # Floored at 60 s to avoid a tight retry loop at the boundary and capped
+                # so a never-set release time can't park the loop forever.
+                backoff = min(_RATE_LIMITED_BACKOFF, max(60.0, mqtt.seconds_until_send_available()))
                 _logger.debug(
-                    "poll_loop [%s]: MQTT rate-limited, no BLE — backing off %.0fh",
+                    "poll_loop [%s]: MQTT rate-limited, no BLE — backing off %.0fs",
                     handle.device_name,
-                    _RATE_LIMITED_BACKOFF / 3600,
+                    backoff,
                 )
-                await handle.sleep_or_rearm(_RATE_LIMITED_BACKOFF)
+                await handle.sleep_or_rearm(backoff)
                 continue
 
         if handle.queue.is_saga_active or handle.in_no_request_mode():

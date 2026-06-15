@@ -586,7 +586,7 @@ class CloudIOTGateway:
             ):
                 return
 
-            logger.debug("Trying to refresh token")
+            logger.debug("Trying to refresh token %s", force)
             config = Config(
                 app_key=self._app_key,
                 app_secret=self._app_secret,

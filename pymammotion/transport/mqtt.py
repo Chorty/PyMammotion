@@ -9,7 +9,6 @@ from dataclasses import dataclass, replace
 import json
 import logging
 import ssl
-import time
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
@@ -352,7 +351,7 @@ class MQTTTransport(Transport):
     async def send(self, payload: bytes, iot_id: str = "", firmware_version: str = "1.0.0.0") -> None:
         """Send *payload* to the device and count it against the 24-hour quota."""
         if self.is_rate_limited and Version(firmware_version) < RATE_LIMIT_REMOVED_VERSION:
-            remaining = self._rate_limited_until - time.monotonic()
+            remaining = self.seconds_until_send_available()
             msg = f"MQTTTransport rate-limited for {remaining:.0f}s more"
             raise TransportRateLimitedError(msg)
         _logger.debug("Sending Mammotion MQTT payload: %s, %s iot_id", payload, iot_id)

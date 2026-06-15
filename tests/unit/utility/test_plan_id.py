@@ -21,31 +21,39 @@ class TestPlanEnabled:
         assert Plan().is_enabled() is True
 
     def test_with_enabled_sets_only_byte_two(self) -> None:
-        # +10 offset on bytes 0,1,3,4,5,6 mirrors the APK's encoding; we
-        # round-trip the buffer verbatim so the helper preserves them.
-        original = "".join(chr(c) for c in [11, 12, 1, 13, 14, 15, 16, 0])
+        # Byte 2 encoding: 0 = enable (sent to device; device echoes back 10),
+        #                  1 = disable (sent to device; device echoes back 11).
+        # Other bytes (0,1,3..6) carry +10-offset values from the device and
+        # are preserved verbatim.
+        original = "".join(chr(c) for c in [11, 12, 10, 13, 14, 15, 16, 0])
         plan = Plan(reserved=original)
 
-        toggled_off = plan.with_enabled(False).reserved.encode("latin-1")
-        assert list(toggled_off) == [11, 12, 0, 13, 14, 15, 16, 0]
+        disabled = plan.with_enabled(False).reserved.encode("latin-1")
+        assert list(disabled) == [11, 12, 1, 13, 14, 15, 16, 0]
 
-        toggled_on = plan.with_enabled(True).reserved.encode("latin-1")
-        assert list(toggled_on) == [11, 12, 1, 13, 14, 15, 16, 0]
+        enabled = plan.with_enabled(True).reserved.encode("latin-1")
+        assert list(enabled) == [11, 12, 0, 13, 14, 15, 16, 0]
 
     def test_with_enabled_pads_short_buffer_to_8_bytes(self) -> None:
         plan = Plan(reserved="")  # zero-length buffer
         raw = plan.with_enabled(True).reserved.encode("latin-1")
         assert len(raw) == 8
-        assert raw[2] == 1
+        assert raw[2] == 0  # enable = 0 (device will echo back 10)
         # Padding bytes are 0
         for i in (0, 1, 3, 4, 5, 6, 7):
             assert raw[i] == 0
 
     def test_is_enabled_reads_byte_two(self) -> None:
-        plan = Plan(reserved="".join(chr(c) for c in [0, 0, 0, 0, 0, 0, 0, 0]))
-        assert plan.is_enabled() is False
-        plan = Plan(reserved="".join(chr(c) for c in [0, 0, 1, 0, 0, 0, 0, 0]))
+        # Device-echo encoding: 10 = enabled, 11 = disabled
+        plan = Plan(reserved="".join(chr(c) for c in [0, 0, 10, 0, 0, 0, 0, 0]))
         assert plan.is_enabled() is True
+        plan = Plan(reserved="".join(chr(c) for c in [0, 0, 11, 0, 0, 0, 0, 0]))
+        assert plan.is_enabled() is False
+        # App/send encoding (after with_enabled, before device acks): 0 = enabled, 1 = disabled
+        plan = Plan(reserved="".join(chr(c) for c in [0, 0, 0, 0, 0, 0, 0, 0]))
+        assert plan.is_enabled() is True
+        plan = Plan(reserved="".join(chr(c) for c in [0, 0, 1, 0, 0, 0, 0, 0]))
+        assert plan.is_enabled() is False
 
     def test_with_renamed(self) -> None:
         plan = Plan(task_name="A").with_renamed("B")

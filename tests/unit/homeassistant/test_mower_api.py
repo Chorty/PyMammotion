@@ -142,11 +142,11 @@ async def test_setup_device_watchers_does_not_register_sys_status_watcher() -> N
 
     Stream lifecycle is owned by DeviceHandle._ble_polling_loop; the client
     used to install a watcher that toggled request_iot_sys here, but that has
-    been moved.  Three watchers should be registered: path-hashes, progress,
-    bol_hash.
+    been moved.  Four watchers should be registered: path-hashes, progress,
+    bol_hash, init_cfg_hash.
     """
     _client, _handle, handlers = _make_client_with_handle()
-    assert len(handlers) == 3
+    assert len(handlers) == 4
 
 
 # ---------------------------------------------------------------------------

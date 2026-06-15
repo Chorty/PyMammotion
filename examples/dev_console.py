@@ -30,6 +30,9 @@ Available in the IPython REPL:
     devices                         list[DeviceHandle]
     send(name, cmd, **kwargs)       Queue a command and block until complete
     send_and_wait(name, cmd, field) Send and block until the response arrives
+    sync_map(name)                  Run a full MapFetchSaga (blocking)
+    sync_mow_path(name)             Fetch the current mow cover path (blocking)
+    sync_tasks(name)                Fetch all scheduled task plans (blocking)
     fetch_rtk(name)                 Fetch LoRa version for an RTK base station
     dump(name)                      Force-write state_{name}.json right now
     listen(on=True)                 Stop/resume MQTT polling on all devices
@@ -594,6 +597,82 @@ class DevConsole:
         except Exception as exc:
             print(f"✗  Error: {exc}")
 
+    def sync_mow_path(
+        self,
+        name: str,
+        zone_hashs: list[int] | None = None,
+        *,
+        skip_planning: bool = True,
+        timeout: float = 120.0,
+    ) -> None:
+        """Fetch the mow cover path for *name* via MowPathSaga and dump state.
+
+        By default uses ``skip_planning=True`` (fetch the path for the currently
+        running job without re-planning).  Pass ``zone_hashs`` and
+        ``skip_planning=False`` to trigger a full plan-and-fetch cycle.
+
+        Blocks until the saga finishes or *timeout* seconds elapse.
+
+        Example:
+            sync_mow_path("Luba-VS563L6H")
+            sync_mow_path("Luba-VS563L6H", zone_hashs=[123456], skip_planning=False)
+
+        """
+        handle = self.mammotion.device_registry.get_by_name(name)
+        if handle is None:
+            print(
+                f"Device {name!r} not found.\n"
+                f"Available: {[h.device_name for h in self.mammotion.device_registry.all_devices]}"
+            )
+            return
+        try:
+            fut = asyncio.run_coroutine_threadsafe(
+                self.mammotion.start_mow_path_saga(
+                    name,
+                    zone_hashs=zone_hashs or [],
+                    skip_planning=skip_planning,
+                ),
+                self.loop,
+            )
+            fut.result(timeout=timeout)
+            print(f"✓  mow path saga enqueued for {name!r} — watching for completion …")
+            self.dump(name)
+        except TimeoutError:
+            print(f"✗  Timed out enqueuing mow path saga for {name!r}")
+        except Exception as exc:
+            print(f"✗  Error: {exc}")
+
+    def sync_tasks(self, name: str, *, timeout: float = 60.0) -> None:
+        """Fetch all stored schedule plans for *name* via PlanFetchSaga.
+
+        Plans arrive as ``todev_planjob_set`` messages and are applied to
+        ``device.map.plan`` by the StateReducer.  Dumps state on completion.
+
+        Blocks until the saga finishes or *timeout* seconds elapse.
+
+        Example:
+            sync_tasks("Luba-VS563L6H")
+
+        """
+        handle = self.mammotion.device_registry.get_by_name(name)
+        if handle is None:
+            print(
+                f"Device {name!r} not found.\n"
+                f"Available: {[h.device_name for h in self.mammotion.device_registry.all_devices]}"
+            )
+            return
+        try:
+            fut = asyncio.run_coroutine_threadsafe(
+                self.mammotion.start_plan_sync(name), self.loop
+            )
+            fut.result(timeout=timeout)
+            print(f"✓  plan sync enqueued for {name!r} — watching for completion …")
+            self.dump(name)
+        except TimeoutError:
+            print(f"✗  Timed out enqueuing plan sync for {name!r}")
+        except Exception as exc:
+            print(f"✗  Error: {exc}")
+
     def dump_all(self) -> None:
         """Force-write state JSON for every connected device."""
         for handle in self.mammotion.device_registry.all_devices:
@@ -937,6 +1016,8 @@ async def _main(args: argparse.Namespace) -> None:
         "send": dev.send,
         "send_and_wait": dev.send_and_wait,
         "sync_map": dev.sync_map,
+        "sync_mow_path": dev.sync_mow_path,
+        "sync_tasks": dev.sync_tasks,
         "fetch_rtk": dev.fetch_rtk,
         "dump": dev.dump,
         "dump_all": dev.dump_all,
@@ -957,6 +1038,8 @@ async def _main(args: argparse.Namespace) -> None:
         "  [cyan]send(name, cmd, **kwargs)[/cyan]                           — queue a command (blocking)\n"
         "  [cyan]send_and_wait(name, cmd, expected_field, **kwargs)[/cyan]  — send and block for response\n"
         "  [cyan]sync_map(name)[/cyan]                                      — run a full MapFetchSaga (blocking)\n"
+        "  [cyan]sync_mow_path(name, zone_hashs=None, skip_planning=True)[/cyan]  — fetch mow cover path\n"
+        "  [cyan]sync_tasks(name)[/cyan]                                    — fetch all scheduled task plans\n"
         "  [cyan]fetch_rtk(name)[/cyan]                                     — fetch LoRa version for an RTK base station\n"
         "  [cyan]dump(name)[/cyan]                                          — write state_{name}.json\n"
         "  [cyan]dump_all()[/cyan]                                          — write state JSON for all devices\n"

@@ -13,7 +13,12 @@ import jwt
 from pymammotion.aliyun.exceptions import LoginException
 from pymammotion.http.model.http import MQTTConnection, UnauthorizedExceptionError
 from pymammotion.transport import AuthError
-from pymammotion.transport.base import ReLoginRequiredError, TransportType, is_transient_network_error
+from pymammotion.transport.base import (
+    ReLoginRequiredError,
+    SessionExpiredError,
+    TransportType,
+    is_transient_network_error,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -325,13 +330,12 @@ class TokenManager:
         The subscription is stored internally and lives as long as this
         TokenManager instance — no external lifetime management needed.
         """
-        from pymammotion.transport.base import SessionExpiredError
 
         async def _on_error(exc: Exception) -> None:
             try:
                 if isinstance(exc, SessionExpiredError) and exc.transport_type == TransportType.CLOUD_MAMMOTION:
                     await self.refresh_mqtt_credentials()
-                else:
+                elif isinstance(exc, SessionExpiredError) and exc.transport_type == TransportType.CLOUD_ALIYUN:
                     await self.refresh_aliyun_credentials()
             except Exception:
                 pass  # refresh methods log internally; swallow here to avoid crashing the error bus

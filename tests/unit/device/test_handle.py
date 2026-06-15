@@ -821,6 +821,53 @@ def test_transport_rate_limit_constant_matches_handle_backoff() -> None:
     assert t._RATE_LIMIT_DURATION == _RATE_LIMITED_BACKOFF  # noqa: SLF001
 
 
+def test_quota_block_self_clears_when_window_slides_under_limit() -> None:
+    """The self-imposed send-quota must release the instant the rolling window drops back
+    under the limit — no fixed-duration ban (that is reserved for cloud 429s)."""
+    from unittest.mock import patch
+
+    t = _make_concrete_transport()
+    limit = t._SEND_LIMIT  # noqa: SLF001
+    window = t._SEND_WINDOW  # noqa: SLF001
+    clock = {"now": 100_000.0}
+
+    with patch("pymammotion.transport.base.time.monotonic", side_effect=lambda: clock["now"]):
+        for _ in range(limit):
+            t.record_send()
+
+        # Quota exhausted — blocked — but NO fixed cloud ban was imposed.
+        assert t.is_rate_limited is True
+        assert t._rate_limited_until == 0.0  # noqa: SLF001 — quota path must not set the cloud timer
+        # Release is exactly one window after the oldest send.
+        assert t.seconds_until_send_available() == window
+
+        # Slide the window so the oldest send ages out → count drops to limit-1.
+        clock["now"] += window + 1.0
+        assert t.is_rate_limited is False
+        assert t.seconds_until_send_available() == 0.0
+
+
+def test_seconds_until_send_available_is_max_of_cloud_ban_and_quota() -> None:
+    """When both a cloud ban and the quota are active, the longer release time wins."""
+    from unittest.mock import patch
+
+    t = _make_concrete_transport()
+    clock = {"now": 0.0}
+
+    with patch("pymammotion.transport.base.time.monotonic", side_effect=lambda: clock["now"]):
+        t._rate_limited_until = 100.0  # noqa: SLF001 — short cloud ban
+        for _ in range(t._SEND_LIMIT):  # noqa: SLF001 — full window, release a whole window away
+            t.record_send()
+
+        # Quota release (_SEND_WINDOW) dominates the 100 s cloud ban.
+        assert t.seconds_until_send_available() == t._SEND_WINDOW  # noqa: SLF001
+
+        # Clear the quota; the cloud ban now dominates.
+        t._send_timestamps.clear()  # noqa: SLF001
+        assert t.seconds_until_send_available() == 100.0
+        assert t.is_rate_limited is True  # cloud ban still active
+
+
 # ---------------------------------------------------------------------------
 # _send_marked raises TransportRateLimitedError when transport is rate-limited
 # ---------------------------------------------------------------------------
