@@ -37,6 +37,7 @@ from pymammotion.data.model.pool_state import (
     PoolBottomType,
     PoolPlan,
     PoolPoint,
+    SpinoErrorEntry,
     SpinoSysStatus,
     SpinoToggle,
     SpinoWorkMode,
@@ -83,6 +84,7 @@ from pymammotion.proto import (
     ResponseBasestationInfoT,
     SvgMessageAckT,
     SysCommCmd,
+    SystemUpdateBufMsg,
     TimeCtrlLight,
     WifiIotStatusReport,
     WorkReportInfoAck,
@@ -107,7 +109,7 @@ class StateReducer(ABC):
     """
 
     def __init__(self, is_saga_active: Callable[[], bool] | None = None) -> None:
-        """Optional callable returning True when a saga is currently running.
+        """Initialise the reducer with an optional saga-active predicate.
 
         When the callable returns True, expensive opportunistic work (e.g.
         :meth:`HashList.generate_geojson`) is skipped — the saga's
@@ -120,7 +122,7 @@ class StateReducer(ABC):
     def apply(self, current: Device, message: LubaMsg) -> Device:
         """Apply *message* to *current* and return the updated device copy."""
 
-    def apply_properties(self, current: Device, properties: ThingPropertiesMessage) -> Device:
+    def apply_properties(self, current: Device, _properties: ThingPropertiesMessage) -> Device:
         """Apply a thing/properties message to *current* and return the updated copy.
 
         The default implementation is a no-op — subclasses that derive meaningful
@@ -130,7 +132,7 @@ class StateReducer(ABC):
         """
         return current
 
-    def apply_mammotion_properties(self, current: Device, properties: MammotionPropertiesMessage) -> Device:
+    def apply_mammotion_properties(self, current: Device, _properties: MammotionPropertiesMessage) -> Device:
         """Apply a Mammotion MQTT flat property push to *current* and return the updated copy.
 
         The default is a no-op; :class:`MowerStateReducer` overrides this to
@@ -798,12 +800,13 @@ class MowerStateReducer(StateReducer):
         except (AttributeError, TypeError):
             _logger.debug("MowerStateReducer: failed to apply deviceVersionInfo (mammotion)")
 
-        if coordinate := p.coordinate:
-            # coordinate.lat/lon arrive in radians; device.location.device is stored in degrees.
-            if coordinate.lat != 0:
-                device.location.device.latitude = math.degrees(coordinate.lat)
-            if coordinate.lon != 0:
-                device.location.device.longitude = math.degrees(coordinate.lon)
+        # seems to be different to the devices own lat lon for some reason
+        # if coordinate := p.coordinate:
+        # coordinate.lat/lon arrive in radians; device.location.device is stored in degrees.
+        # if coordinate.lat != 0:
+        #     device.location.device.latitude = math.degrees(coordinate.lat)
+        # if coordinate.lon != 0:
+        #     device.location.device.longitude = math.degrees(coordinate.lon)
 
         try:
             if net := p.network_info:
@@ -922,6 +925,9 @@ class PoolStateReducer(StateReducer):
             case "bidire_comm_cmd":
                 device.pool_state = copy.deepcopy(current.pool_state)
                 self._update_toggle(device, sys_msg[1])  # type: ignore
+            case "system_update_buf":
+                device.pool_state = copy.deepcopy(current.pool_state)
+                self._update_system_update_buf(device, sys_msg[1])  # type: ignore
             case _:
                 _logger.debug(
                     "PoolStateReducer: ignoring unhandled sys sub-message %r for %s",
@@ -991,6 +997,43 @@ class PoolStateReducer(StateReducer):
                     map_info.tag,
                     device.name,
                 )
+
+    def _update_system_update_buf(self, device: PoolCleanerDevice, buf: SystemUpdateBufMsg) -> None:
+        """Parse a ``systemUpdateBuf`` message and apply it to *device*.
+
+        Wire layout (``DeviceConstant.systemUpdateBuf``, ID constants):
+          ``[0]``     type_id — only ``SYSTEM_ERR_CODE_ID = 2`` is currently
+                      observed on Spino; ID 1 (init config) and 3 (zone state)
+                      are mower-specific and silently ignored.
+          ``[1]``     buffer length (3 header + 2 × N error pairs).
+          ``[2]``     cumulative fault-event counter (``ERR_CODE_CNT_INDEX``).
+          ``[3+2i]``  error code (signed int64).
+          ``[4+2i]``  Unix timestamp in seconds of the fault event.
+
+        Zero-code entries are trailing padding slots and are filtered out.
+        Older firmware sends 10 pairs; newer firmware (len=43) sends 20 pairs.
+        """
+        data = buf.update_buf_data
+        if len(data) < 3:
+            return
+        buf_id = data[0]
+        if buf_id != 2:  # SYSTEM_ERR_CODE_ID — 1 and 3 are mower-only
+            _logger.debug(
+                "PoolStateReducer: unhandled systemUpdateBuf id=%d for %s",
+                buf_id,
+                device.name,
+            )
+            return
+        device.pool_state.error_count = int(data[2])
+        entries: list[SpinoErrorEntry] = []
+        i = 3
+        while i + 1 < len(data):
+            code = int(data[i])
+            stamp = int(data[i + 1])
+            if code != 0 or stamp != 0:
+                entries.append(SpinoErrorEntry(code=code, timestamp=stamp))
+            i += 2
+        device.pool_state.error_log = entries
 
     def _update_plan_job_set(self, device: PoolCleanerDevice, wire: PlanJobSet) -> None:
         """Upsert a Spino plan into ``device.plans`` from a wire ``PlanJobSet``.

@@ -155,8 +155,8 @@ class BLETransport(Transport):
         After this call ``is_usable`` returns False until ``set_ble_device()``
         is called with a fresh advertisement.  This is the explicit "give up
         and wait for a new advertisement" entry point — distinct from the
-        automatic ``connect()`` failure-threshold path which preserves the
-        cooldown so retries are paced.
+        automatic ``connect()`` failure-threshold path which arms a cooldown
+        while preserving the device pointer for re-use once the timer lapses.
         """
         self._ble_device = None
         self._consecutive_failures = 0
@@ -188,7 +188,7 @@ class BLETransport(Transport):
             return False
         if self._last_rssi is not None and self._last_rssi < self._config.min_rssi:
             return False
-        return super().is_usable and time.monotonic() >= self._connect_cooldown_until
+        return time.monotonic() >= self._connect_cooldown_until
 
     # ------------------------------------------------------------------
     # Transport ABC
@@ -356,8 +356,10 @@ class BLETransport(Transport):
         )
         # Reset counter so the next post-cooldown attempt starts a fresh tally.
         self._consecutive_failures = 0
-        # Drop the stale BLEDevice; HA's next advertisement will repopulate.
-        self._ble_device = None
+        # _ble_device is intentionally kept — the device may just be temporarily
+        # out of range and is likely still reachable once the cooldown expires.
+        # is_usable returns False during cooldown via the monotonic timer check,
+        # and automatically recovers to True once the timer lapses.
 
     async def _self_managed_discover(self) -> None:
         """Run a one-shot bleak scan to populate ``_ble_device`` from ``ble_address``.

@@ -405,6 +405,34 @@ def test_clear_ble_device_resets_state(transport: BLETransport) -> None:
     assert transport.is_usable is False
 
 
+def test_cooldown_expiry_restores_is_usable_without_new_advertisement(config: BLETransportConfig) -> None:
+    """After the cooldown lapses, is_usable becomes True without a new advertisement.
+
+    _record_connect_failure() no longer clears _ble_device — the device is
+    merely temporarily out of range and may be reachable again once the cooldown
+    expires.  is_usable is gated solely by the monotonic timer, so it recovers
+    automatically when the timer lapses with no call_later or new advertisement
+    required.
+    """
+    import time
+
+    transport = BLETransport(config)
+    transport.set_ble_device(_ble_device_with_address("AA:BB:CC:DD:EE:FF"))
+
+    # Trip the cooldown — _ble_device must NOT be cleared.
+    transport._record_connect_failure()  # noqa: SLF001
+
+    # During cooldown: unusable, but device pointer preserved.
+    assert transport._ble_device is not None  # noqa: SLF001
+    assert transport.is_usable is False
+
+    # Simulate expiry by rewinding the deadline.
+    transport._connect_cooldown_until = time.monotonic() - 1.0  # noqa: SLF001
+
+    # Cooldown gone, device still set — is_usable recovers on its own.
+    assert transport.is_usable is True
+
+
 async def test_connect_failure_threshold_triggers_cooldown(config: BLETransportConfig) -> None:
     """N consecutive BleakError failures clear the BLEDevice and start a cooldown."""
     from bleak.exc import BleakError
@@ -422,8 +450,8 @@ async def test_connect_failure_threshold_triggers_cooldown(config: BLETransportC
             with pytest.raises(BLEUnavailableError):
                 await transport.connect()
 
-    # Threshold trip → BLEDevice cleared, cooldown set, transport unusable.
-    assert transport._ble_device is None  # noqa: SLF001
+    # Threshold trip → cooldown set, transport unusable; device pointer preserved.
+    assert transport._ble_device is not None  # noqa: SLF001 — kept for post-cooldown re-use
     assert transport.is_usable is False
     assert transport._connect_cooldown_until > 0.0  # noqa: SLF001
 
@@ -453,8 +481,8 @@ async def test_out_of_slots_error_trips_cooldown_immediately(config: BLETranspor
         with pytest.raises(BLEUnavailableError):
             await transport.connect()
 
-    # One failure was enough: device cleared, cooldown armed, transport unusable.
-    assert transport._ble_device is None  # noqa: SLF001
+    # One failure was enough: cooldown armed, transport unusable; device pointer preserved.
+    assert transport._ble_device is not None  # noqa: SLF001 — kept for post-cooldown re-use
     assert transport.is_usable is False
     assert transport._connect_cooldown_until > 0.0  # noqa: SLF001
 

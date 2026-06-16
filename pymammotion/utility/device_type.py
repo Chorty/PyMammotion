@@ -609,6 +609,25 @@ class DeviceType(Enum):
         """Return True if this device type supports video streaming (all models except the original Luba 1)."""
         return self != DeviceType.LUBA
 
+    def supports_battery_cycle_count(self) -> bool:
+        """Return True if the device has a built-in (non-removable) battery and reports cycle count.
+
+        Mirrors APK ``DeviceType.isSupportBatteryLoopCount()``.  The 9 models
+        below use removable/detachable battery packs and do not report a
+        meaningful ``bat_cycles`` value.
+        """
+        return self not in (
+            DeviceType.YUKA_MINI,
+            DeviceType.YUKA_ML,
+            DeviceType.LUBA_MN,
+            DeviceType.YUKA_MINIV,
+            DeviceType.YUKA_MN100,
+            DeviceType.YUKA_MN101,
+            DeviceType.LUBA_LD,
+            DeviceType.LUBA_LA,
+            DeviceType.LUBA_MB,
+        )
+
 
 # Numeric id -> DeviceType, used by DeviceType.from_value. Built straight from the
 # enum members' ids (the first tuple element), so it stays 1:1 with the definitions

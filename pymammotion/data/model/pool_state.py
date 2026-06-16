@@ -112,6 +112,23 @@ class SpinoToggle(IntEnum):
 
 
 @dataclass
+class SpinoErrorEntry(DataClassORJSONMixin):
+    """A single fault event from the Spino's rolling error log.
+
+    Transmitted via ``systemUpdateBuf`` ID=2 (``SYSTEM_ERR_CODE_ID``).
+    The device maintains a rolling log of up to 20 entries (newer firmware)
+    or 10 entries (older firmware).  Zero-code entries are trailing padding
+    and are filtered out by the reducer.
+    """
+
+    code: int = 0
+    """Fault code (signed int64 from the wire)."""
+
+    timestamp: int = 0
+    """Unix timestamp (seconds) when the fault occurred."""
+
+
+@dataclass
 class PoolPoint(DataClassORJSONMixin):
     """A single point in pool-local 2D coordinates.
 
@@ -179,6 +196,16 @@ class PoolState(DataClassORJSONMixin):
     turbo_clean: bool = False
     platform_cleaning: bool = False
     waterline_parking: bool = False
+
+    # --- Error log (systemUpdateBuf ID=2) ---------------------------------
+    error_log: list[SpinoErrorEntry] = field(default_factory=list)
+    """Rolling fault log (most-recent entries, zero-code padding stripped).
+    Updated whenever the device sends a ``systemUpdateBuf`` ID=2 message."""
+
+    error_count: int = 0
+    """Cumulative fault-event counter from the wire (``ERR_CODE_CNT_INDEX``).
+    Monotonically increases; compare against a stored baseline to detect new
+    faults since the last read."""
 
 
 @dataclass

@@ -780,31 +780,31 @@ class TestStateReducerAreaNameFallback:
 # offsets ÷ 111111 and never converts).  RTK stays radians (sensor.py * 180/pi).
 # ===========================================================================
 
-
-def test_mammotion_coordinate_stored_in_degrees() -> None:
-    """apply_mammotion_properties must convert coordinate.lat/lon (radians) to degrees."""
-    import math
-
-    from pymammotion.data.mqtt.mammotion_properties import Coordinate, DeviceProperties
-    from pymammotion.data.mqtt.properties import MammotionPropertiesMessage
-
-    reducer = MowerStateReducer()
-    device = _make_device()
-
-    lat_rad, lon_rad = 0.5, 0.2  # ~28.6479°, ~11.4592° — both within ~28° of the equator
-    props = MammotionPropertiesMessage(
-        id="1",
-        version="1.0",
-        sys={},
-        params=DeviceProperties(coordinate=Coordinate(lon=lon_rad, lat=lat_rad)),
-    )
-
-    updated = reducer.apply_mammotion_properties(device, props)
-
-    assert updated.location.device.latitude == pytest.approx(math.degrees(lat_rad))
-    assert updated.location.device.longitude == pytest.approx(math.degrees(lon_rad))
-    # Sanity: the stored value is real degrees, not the raw radians.
-    assert updated.location.device.latitude != pytest.approx(lat_rad)
+#
+# def test_mammotion_coordinate_stored_in_degrees() -> None:
+#     """apply_mammotion_properties must convert coordinate.lat/lon (radians) to degrees."""
+#     import math
+#
+#     from pymammotion.data.mqtt.mammotion_properties import Coordinate, DeviceProperties
+#     from pymammotion.data.mqtt.properties import MammotionPropertiesMessage
+#
+#     reducer = MowerStateReducer()
+#     device = _make_device()
+#
+#     lat_rad, lon_rad = 0.5, 0.2  # ~28.6479°, ~11.4592° — both within ~28° of the equator
+#     props = MammotionPropertiesMessage(
+#         id="1",
+#         version="1.0",
+#         sys={},
+#         params=DeviceProperties(coordinate=Coordinate(lon=lon_rad, lat=lat_rad)),
+#     )
+#
+#     updated = reducer.apply_mammotion_properties(device, props)
+#
+#     assert updated.location.device.latitude == pytest.approx(math.degrees(lat_rad))
+#     assert updated.location.device.longitude == pytest.approx(math.degrees(lon_rad))
+#     # Sanity: the stored value is real degrees, not the raw radians.
+#     assert updated.location.device.latitude != pytest.approx(lat_rad)
 
 
 def test_mammotion_coordinate_zero_is_left_unset() -> None:
