@@ -927,7 +927,7 @@ class GeojsonGenerator:
     # ``{n}`` is the 1-based index within the type.
     # It is used when the device has no user label for this hash.
     _NAME_TEMPLATES: ClassVar[dict[str, str]] = {
-        "area": "Zone {n}",
+        "area": "Area {n}",
         "path": "Path {n}",
         "obstacle": "Obstacle {n}",
         "dump": "Dump zone {n}",

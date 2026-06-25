@@ -34,6 +34,7 @@ from pymammotion.data.model.hash_list import (
     SvgMessage,
 )
 from pymammotion.data.model.pool_state import (
+    MapTrans,
     PoolBottomType,
     PoolPlan,
     PoolPoint,
@@ -48,6 +49,7 @@ from pymammotion.data.model.work import CurrentTaskSettings
 from pymammotion.data.mqtt.properties import OTAProgressItems
 from pymammotion.proto import (
     AppDownlinkCmdT,
+    AppDownlinkCmdTypeE,
     AppGetAllAreaHashName,
     AppGetCutterWorkMode,
     AppSetCutterWorkMode,
@@ -967,7 +969,18 @@ class PoolStateReducer(StateReducer):
         setattr(device.pool_state, toggle.name, bool(cmd.context))
 
     def _update_app_downlink_cmd(self, device: PoolCleanerDevice, cmd: AppDownlinkCmdT) -> None:
-        """Apply an incoming ``AppDownlinkCmdT`` (settings ack or map data) to *device*."""
+        """Apply an incoming ``AppDownlinkCmdT`` (settings ack or map data) to *device*.
+
+        **Map/line geometry** — the device always populates ``map_info`` (field 6)
+        regardless of whether the command was ``app_get_map_cmd`` (3) or
+        ``app_get_line_cmd`` (4).  The ``cmd`` field is the authoritative
+        discriminant (APK source: ``MACarDataManager``, case 23).
+
+        Multi-packet transfers use ``pack_index`` (1-based) and ``pack_num``
+        alongside ``MapTrans.tag`` (1=transmitting / 0=completed / 2=failed).
+        ``pack_index == 1`` signals the start of a new transfer and resets the
+        accumulation buffer so stale data from a previous failed fetch is discarded.
+        """
         # Settings — only update fields the device actually populated.  WallMaterial
         # / PoolBottomType are UnknownTolerantIntEnum (unknown → UNKNOWN, logged once).
         if cmd.wall_material is not None:
@@ -977,26 +990,51 @@ class PoolStateReducer(StateReducer):
         if cmd.floor_speed is not None:
             device.pool_state.floor_speed = cmd.floor_speed
 
-        # Pool geometry — boundary outline (tag=0) and cleaning path (tag=1).
-        # MapInfo is sent in packets (pack_index / pack_num); the simplest
-        # correct behaviour is to wait for the final packet and replace the
-        # whole list. Until we see what real traffic looks like, treat each
-        # incoming MapInfo as a complete payload — the proto allows
-        # total_points to indicate the full length per packet.
-        for map_info in (cmd.map_info, cmd.line_info):
-            if map_info is None:
-                continue
-            points = [PoolPoint(x=p.x, y=p.y) for p in map_info.points]
-            if map_info.tag == 0:
-                device.pool_map.boundary = points
-            elif map_info.tag == 1:
-                device.pool_map.cleaning_path = points
-            else:
-                _logger.debug(
-                    "PoolStateReducer: unknown MapInfo tag=%d for %s",
-                    map_info.tag,
-                    device.name,
-                )
+        # Pool geometry — the device uses map_info (field 6) for BOTH map and line
+        # responses.  line_info (field 7) is never populated in observed traffic.
+        map_info = cmd.map_info
+        if map_info is None or not map_info.points:
+            return
+
+        is_map = cmd.cmd == AppDownlinkCmdTypeE.app_get_map_cmd
+        is_line = cmd.cmd == AppDownlinkCmdTypeE.app_get_line_cmd
+        if not (is_map or is_line):
+            return
+
+        new_points = [PoolPoint(x=p.x, y=p.y) for p in map_info.points]
+        tag = map_info.tag  # MapTrans raw int: 0=completed, 1=transmitting, 2=failed
+
+        if tag == MapTrans.failed:
+            _logger.warning(
+                "PoolStateReducer: %s map/line fetch failed (MapTrans.failed) for %s",
+                "boundary" if is_map else "route",
+                device.name,
+            )
+            return
+
+        # pack_index==1 means the first (or only) packet of a new transfer.
+        # Reset to avoid accumulating leftover points from a previous fetch.
+        existing = device.pool_map.boundary if is_map else device.pool_map.cleaning_path
+        if map_info.pack_index == 1:
+            accumulated = new_points
+        else:
+            accumulated = list(existing) + new_points
+
+        if is_map:
+            device.pool_map.boundary = accumulated
+        else:
+            device.pool_map.cleaning_path = accumulated
+
+        _logger.debug(
+            "PoolStateReducer: %s %s packet %d/%d (%d pts, total=%d) for %s",
+            "boundary" if is_map else "route",
+            "completed" if tag == MapTrans.completed else "transmitting",
+            map_info.pack_index,
+            map_info.pack_num,
+            len(new_points),
+            map_info.total_points,
+            device.name,
+        )
 
     def _update_system_update_buf(self, device: PoolCleanerDevice, buf: SystemUpdateBufMsg) -> None:
         """Parse a ``systemUpdateBuf`` message and apply it to *device*.

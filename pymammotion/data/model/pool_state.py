@@ -23,6 +23,23 @@ from mashumaro.mixins.orjson import DataClassORJSONMixin
 from pymammotion.utility.enum_base import UnknownTolerantIntEnum
 
 
+class MapTrans(IntEnum):
+    """Transfer status carried in ``MapInfo.tag`` for pool map/line packets.
+
+    Both ``app_get_map_cmd`` and ``app_get_line_cmd`` device responses stream
+    points in one or more ``AppDownlinkCmdT`` frames.  ``tag`` indicates
+    whether more frames will follow:
+
+    * ``completed`` (0)  — last (or only) packet; accumulation is done.
+    * ``transmitting`` (1) — more frames coming; append and wait.
+    * ``failed`` (2) — device error; discard accumulated data.
+    """
+
+    completed = 0
+    transmitting = 1
+    failed = 2
+
+
 class SpinoSysStatus(UnknownTolerantIntEnum):
     """Top-level system state reported in ``dev_statue_t.sys_status`` (int32).
 
