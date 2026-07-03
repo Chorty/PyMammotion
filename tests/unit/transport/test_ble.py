@@ -367,7 +367,7 @@ def test_is_usable_true_when_rssi_above_threshold(transport: BLETransport) -> No
 
 def test_is_usable_false_when_rssi_below_threshold(transport: BLETransport) -> None:
     """An RSSI weaker than config.min_rssi marks the transport unusable."""
-    transport.set_ble_device(_ble_device_with_address("AA:BB:CC:DD:EE:FF"), rssi=-90)
+    transport.set_ble_device(_ble_device_with_address("AA:BB:CC:DD:EE:FF"), rssi=-95)
     assert transport.is_usable is False
 
 
@@ -380,9 +380,9 @@ def test_is_usable_true_when_rssi_unknown(transport: BLETransport) -> None:
 
 def test_set_ble_device_without_rssi_keeps_last_known(transport: BLETransport) -> None:
     """A refresh that omits RSSI leaves the previously reported value intact."""
-    transport.set_ble_device(_ble_device_with_address("AA:BB:CC:DD:EE:FF"), rssi=-90)
+    transport.set_ble_device(_ble_device_with_address("AA:BB:CC:DD:EE:FF"), rssi=-95)
     transport.set_ble_device(_ble_device_with_address("AA:BB:CC:DD:EE:FF"))
-    assert transport._last_rssi == -90  # noqa: SLF001
+    assert transport._last_rssi == -95  # noqa: SLF001
     assert transport.is_usable is False
 
 

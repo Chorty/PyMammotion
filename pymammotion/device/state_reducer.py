@@ -581,6 +581,12 @@ class MowerStateReducer(StateReducer):
             case "toapp_networkinfo_rsp":
                 get_network_info_resp: GetNetworkInfoRsp = net_msg[1]  # type: ignore
                 device.mower_state.wifi_mac = get_network_info_resp.wifi_mac
+                device.mower_state.wifi_ssid = get_network_info_resp.wifi_ssid
+                device.report_data.connect.wifi_rssi = get_network_info_resp.wifi_rssi
+                device.mower_state.ip = get_network_info_resp.ip
+                device.mower_state.mask = get_network_info_resp.mask
+                device.mower_state.gateway = get_network_info_resp.gateway
+
             case "toapp_upgrade_report":
                 upgrade_report: DrvUpgradeReport = net_msg[1]  # type: ignore
                 device.events.ota_progress.devname = upgrade_report.devname

@@ -78,6 +78,9 @@ class MowerInfo(DataClassORJSONMixin):
     wifi_mac: str = ""
     wifi_ssid: str = ""
     ip_address: str = ""
+    ip: int = 0
+    mask: int = 0
+    gateway: int = 0
     internal_model: str = ""  # thing/properties intMod — internal SKU (e.g. "HM020080YKMINI06")
     battery_hardware: str = ""  # thing/properties bmsHardwareVersion (e.g. "BW_BATTERY_25P_6S1P")
     lamp_info: LampInfo = field(default_factory=LampInfo)
