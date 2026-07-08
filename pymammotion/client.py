@@ -47,15 +47,18 @@ import json
 import logging
 import time
 from typing import TYPE_CHECKING, Any, cast
+from urllib.parse import urlparse
 
 from mashumaro import MissingField
 
 from pymammotion.account.registry import BLE_ONLY_ACCOUNT, AccountRegistry, AccountSession
 from pymammotion.aliyun.cloud_gateway import CloudIOTGateway
+from pymammotion.aliyun.model.dev_by_account_response import Device
 from pymammotion.auth.token_manager import MQTTCredentials, TokenManager
 from pymammotion.bluetooth.manager import BLETransportManager
 from pymammotion.data.model import GenerateRouteInformation
-from pymammotion.data.model.device import MowerDevice, RTKBaseStationDevice
+from pymammotion.data.model.device import MowerDevice, MowingDevice, RTKBaseStationDevice, create_device
+from pymammotion.data.model.hash_list import PathType
 from pymammotion.data.mqtt.status import StatusType
 from pymammotion.device.handle import DeviceHandle, DeviceRegistry
 from pymammotion.device.readiness import get_readiness_checker
@@ -71,7 +74,13 @@ from pymammotion.http.model.http import (
 )
 from pymammotion.http.model.response_factory import response_factory
 from pymammotion.messaging.command_queue import Priority
+from pymammotion.messaging.common_data_saga import CommonDataSaga
+from pymammotion.messaging.edge_saga import EdgeMappingSaga
 from pymammotion.messaging.map_saga import MapFetchSaga
+from pymammotion.messaging.mow_path_saga import MowPathSaga
+from pymammotion.messaging.plan_saga import PlanFetchSaga
+from pymammotion.messaging.spino_plan_saga import SpinoPlanFetchSaga
+from pymammotion.messaging.svg_saga import SvgSendSaga
 from pymammotion.proto import RptAct, RptInfoType
 from pymammotion.transport.aliyun_mqtt import AliyunMQTTConfig, AliyunMQTTTransport
 from pymammotion.transport.base import (
@@ -90,6 +99,7 @@ from pymammotion.transport.ble import BLETransport, BLETransportConfig
 from pymammotion.transport.mqtt import MQTTTransport, MQTTTransportConfig
 from pymammotion.utility.constant import WorkMode
 from pymammotion.utility.device_type import DeviceType
+from pymammotion.utility.svg import chunk_svg_messages
 
 #: Channels for the continuous subscription (matches HA-Luba async_request_iot_sync_continuous).
 _CONTINUOUS_STREAM_CHANNELS: list[RptInfoType] = [
@@ -102,6 +112,10 @@ _CONTINUOUS_STREAM_CHANNELS: list[RptInfoType] = [
     RptInfoType.RIT_CONNECT,
 ]
 #: Full channel list used by the one-shot request_iot_sync.
+#: Seconds to wait before each Aliyun→Mammotion unbound-migration attempt (first is
+#: immediate).  The cloud-side migration after a firmware update can take minutes.
+_UNBOUND_MIGRATION_DELAYS: tuple[float, ...] = (0.0, 30.0, 60.0, 120.0, 180.0)
+
 _ONE_SHOT_CHANNELS: list[RptInfoType] = [
     RptInfoType.RIT_DEV_STA,
     RptInfoType.RIT_DEV_LOCAL,
@@ -122,7 +136,6 @@ if TYPE_CHECKING:
     from aiohttp import ClientSession
     from bleak import BLEDevice
 
-    from pymammotion.data.model.device import MowingDevice
     from pymammotion.data.mqtt.event import ThingEventMessage
     from pymammotion.data.mqtt.properties import MammotionPropertiesMessage, ThingPropertiesMessage
     from pymammotion.data.mqtt.status import ThingStatusMessage
@@ -226,9 +239,25 @@ class MammotionClient:
             await handle.stop()
 
     async def remove_device(self, name: str) -> None:
-        """Stop and remove the named device from the registry."""
-        if handle := self._device_registry.get_by_name(name):
-            await self._device_registry.unregister(handle.device_id)
+        """Stop and remove the named device from the registry.
+
+        Account-shared cloud transports (Aliyun / Mammotion MQTT) are detached —
+        NOT disconnected — while other devices on the same account remain, since
+        ``handle.stop()`` disconnects every transport still attached and would
+        otherwise tear down cloud connectivity for every surviving mower.  Only
+        the account's last device takes the shared transport down with it.
+        """
+        handle = self._device_registry.get_by_name(name)
+        if handle is None:
+            return
+        self.teardown_device_watchers(name)
+        self._iot_id_to_device_id.pop(handle.iot_id, None)
+        if (session := self._get_session_for_device(name)) is not None:
+            session.device_ids.discard(name)
+            if session.device_ids:
+                for transport_type in (TransportType.CLOUD_ALIYUN, TransportType.CLOUD_MAMMOTION):
+                    handle.detach_transport(transport_type)
+        await self._device_registry.unregister(handle.device_id)
 
     # ------------------------------------------------------------------
     # Device state watchers
@@ -368,6 +397,11 @@ class MammotionClient:
             _on_init_cfg_hash_changed,
         )
 
+        # Cancel any previous watchers first: a plain overwrite leaves the old
+        # Subscriptions live on the handle's state bus, double-firing every
+        # map/plan sync trigger after a re-setup.
+        for old_sub in self._watcher_subscriptions.pop(device_name, []):
+            old_sub.cancel()
         self._watcher_subscriptions[device_name] = [
             sub,
             progress_sub,
@@ -498,8 +532,6 @@ class MammotionClient:
 
         Skips RTK base stations and swimming-pool (Spino/S1/E1) devices.
         """
-        from pymammotion.utility.device_type import DeviceType
-
         for handle in self._device_registry.all_devices:
             name = handle.device_name
             if DeviceType.is_rtk(name) or DeviceType.is_swimming_pool(name):
@@ -738,8 +770,6 @@ class MammotionClient:
                          checks every registered mower device.
 
         """
-        from pymammotion.data.model.device import MowingDevice
-
         handles = (
             [self._device_registry.get_by_name(device_name)] if device_name else list(self._device_registry.all_devices)
         )
@@ -1208,8 +1238,7 @@ class MammotionClient:
                 raw["mammotion_jwt_info"] = session.mammotion_http.jwt_info
             if session.mammotion_http.device_records.records:
                 raw["mammotion_device_records"] = session.mammotion_http.device_records
-            return raw
-        return {}
+        return raw
 
     async def restore_credentials(
         self,
@@ -1343,8 +1372,6 @@ class MammotionClient:
         stays in ``_register_mammotion_device`` and is performed before this
         helper is called.
         """
-        from pymammotion.data.model.device import create_device
-
         handle = DeviceHandle(
             device_id=device_name,
             device_name=device_name,
@@ -1479,8 +1506,6 @@ class MammotionClient:
         token_manager: TokenManager,
     ) -> MQTTTransport:
         """Build a MQTTTransport from MQTTConnection credentials."""
-        from urllib.parse import urlparse
-
         parsed = urlparse(mqtt_creds.host if "://" in mqtt_creds.host else "tcp://" + mqtt_creds.host)
         use_ssl = parsed.scheme in ("mqtts", "ssl")
         config = MQTTTransportConfig(
@@ -1647,42 +1672,87 @@ class MammotionClient:
         device_name = handle.device_name
         session = self._get_session_for_device(device_name)
         try:
-            if session is None or session.mammotion_http is None:
-                _logger.warning("Device '%s' unbound but no Mammotion session to re-discover — removing", device_name)
-                await self._remove_unbound_device(handle, session)
-                return
-
-            mammotion_http = session.mammotion_http
-            device_list_resp = await mammotion_http.get_user_device_list()
-            owned_iot_id_map = {
-                d.device_name: d.iot_id for d in (device_list_resp.data or []) if d.device_name and d.iot_id
-            }
-            page_resp = await mammotion_http.get_user_device_page()
-            records = (page_resp.data.records if page_resp.data else []) or []
-            record = next((r for r in records if r.device_name == device_name), None)
-            if record is None:
-                _logger.warning("Device '%s' unbound and not on Mammotion MQTT either — removing", device_name)
-                await self._remove_unbound_device(handle, session)
-                return
-
-            transport = await self._ensure_mammotion_transport(session.account_id, mammotion_http, session)
-            if transport is None:
-                _logger.error("Device '%s' unbound: could not set up Mammotion transport — left detached", device_name)
-                return
-
-            iot_id = owned_iot_id_map.get(device_name) or record.iot_id
-            await self._subscribe_mammotion_topics(transport, record.product_key, device_name, iot_id)
-            if iot_id != handle.iot_id:
-                self._iot_id_to_device_id.pop(handle.iot_id, None)
-                handle.iot_id = iot_id
-            self._iot_id_to_device_id[iot_id] = device_name
-            session.device_ids.add(device_name)
-            await handle.add_transport(transport)
-            _logger.info("Device '%s' migrated from Aliyun to Mammotion MQTT (iot_id=%s)", device_name, iot_id)
-        except Exception:
-            _logger.exception("Device '%s' unbound: migration failed", device_name)
+            # The Aliyun→Mammotion cloud migration after a firmware update is NOT
+            # instantaneous: the 29004 unbind lands before the device is listed on
+            # the Mammotion side.  A one-shot check here removed devices mid-flight
+            # (issue #819) or left them permanently transport-less (#808), so retry
+            # over several minutes before concluding the device is really gone.
+            for attempt, delay in enumerate(_UNBOUND_MIGRATION_DELAYS, start=1):
+                if attempt > 1:
+                    await asyncio.sleep(delay)
+                last_attempt = attempt == len(_UNBOUND_MIGRATION_DELAYS)
+                try:
+                    if await self._try_migrate_unbound(handle, session, final_attempt=last_attempt):
+                        return
+                except Exception:
+                    _logger.exception(
+                        "Device '%s' unbound: migration attempt %d/%d failed",
+                        device_name,
+                        attempt,
+                        len(_UNBOUND_MIGRATION_DELAYS),
+                    )
         finally:
             handle.reset_unbound_migration()
+
+    async def _try_migrate_unbound(
+        self, handle: DeviceHandle, session: AccountSession | None, *, final_attempt: bool
+    ) -> bool:
+        """One Aliyun→Mammotion migration attempt.  Returns True when settled (migrated,
+        removed, or deliberately left BLE-only) — False means "retry later".
+
+        Removal only happens on the *final* attempt, and never while the handle still
+        has a usable BLE transport (a BLE-only device keeps working without any cloud).
+        """
+        device_name = handle.device_name
+
+        def _keep_or_remove(reason: str) -> bool:
+            if not final_attempt:
+                _logger.debug("Device '%s' unbound: %s — will retry", device_name, reason)
+                return False
+            if handle.get_transport(TransportType.BLE) is not None:
+                _logger.warning("Device '%s' unbound: %s — keeping as BLE-only", device_name, reason)
+                return True
+            return False  # caller removes below
+
+        if session is None or session.mammotion_http is None:
+            settled = _keep_or_remove("no Mammotion session to re-discover")
+            if settled or not final_attempt:
+                return settled
+            _logger.warning("Device '%s' unbound but no Mammotion session to re-discover — removing", device_name)
+            await self._remove_unbound_device(handle, session)
+            return True
+
+        mammotion_http = session.mammotion_http
+        device_list_resp = await mammotion_http.get_user_device_list()
+        owned_iot_id_map = {
+            d.device_name: d.iot_id for d in (device_list_resp.data or []) if d.device_name and d.iot_id
+        }
+        page_resp = await mammotion_http.get_user_device_page()
+        records = (page_resp.data.records if page_resp.data else []) or []
+        record = next((r for r in records if r.device_name == device_name), None)
+        if record is None:
+            settled = _keep_or_remove("not on Mammotion MQTT yet")
+            if settled or not final_attempt:
+                return settled
+            _logger.warning("Device '%s' unbound and not on Mammotion MQTT either — removing", device_name)
+            await self._remove_unbound_device(handle, session)
+            return True
+
+        transport = await self._ensure_mammotion_transport(session.account_id, mammotion_http, session)
+        if transport is None:
+            _logger.error("Device '%s' unbound: could not set up Mammotion transport — will retry", device_name)
+            return False
+
+        iot_id = owned_iot_id_map.get(device_name) or record.iot_id
+        await self._subscribe_mammotion_topics(transport, record.product_key, device_name, iot_id)
+        if iot_id != handle.iot_id:
+            self._iot_id_to_device_id.pop(handle.iot_id, None)
+            handle.iot_id = iot_id
+        self._iot_id_to_device_id[iot_id] = device_name
+        session.device_ids.add(device_name)
+        await handle.add_transport(transport)
+        _logger.info("Device '%s' migrated from Aliyun to Mammotion MQTT (iot_id=%s)", device_name, iot_id)
+        return True
 
     async def _remove_unbound_device(self, handle: DeviceHandle, session: AccountSession | None) -> None:
         """Fully remove a device that is unbound from all clouds.
@@ -2140,8 +2210,6 @@ class MammotionClient:
         applies to ``device.map.plan`` automatically.  The saga also clears
         ``device.map.plans_stale`` once complete.
         """
-        from pymammotion.messaging.plan_saga import PlanFetchSaga
-
         handle = self._device_registry.get_by_name(device_name)
         if handle is None:
             _logger.warning("start_plan_sync: device '%s' not registered", device_name)
@@ -2157,8 +2225,6 @@ class MammotionClient:
         arrive as ``LubaMsg.ctrl.plan_job_set`` frames which the
         :class:`PoolStateReducer` applies to ``device.plans`` automatically.
         """
-        from pymammotion.messaging.spino_plan_saga import SpinoPlanFetchSaga
-
         handle = self._device_registry.get_by_name(device_name)
         if handle is None:
             _logger.warning("start_spino_plan_sync: device '%s' not registered", device_name)
@@ -2204,9 +2270,6 @@ class MammotionClient:
                          ``None`` if the saga did not return a hash (e.g. DELETE).
 
         """
-        from pymammotion.messaging.svg_saga import SvgSendSaga
-        from pymammotion.utility.svg import chunk_svg_messages
-
         handle = self._device_registry.get_by_name(device_name)
         if handle is None:
             _logger.warning("send_svg: device '%s' not registered", device_name)
@@ -2261,8 +2324,6 @@ class MammotionClient:
                            the device started working externally).
 
         """
-        from pymammotion.messaging.mow_path_saga import MowPathSaga
-
         if handle := self._device_registry.get_by_name(device_name):
             # MQTT-only gate: skip when mow_path_fetch_enabled is False AND BLE
             # isn't actively connected (so this would go over MQTT).  BLE-routed
@@ -2309,9 +2370,6 @@ class MammotionClient:
             device_name: Registered device name.
 
         """
-        from pymammotion.data.model.hash_list import PathType
-        from pymammotion.messaging.common_data_saga import CommonDataSaga
-
         handle = self._device_registry.get_by_name(device_name)
         if handle is None:
             _logger.warning("get_dynamics_line: device '%s' not registered", device_name)
@@ -2350,8 +2408,6 @@ class MammotionClient:
                          when the device is already mapping.
 
         """
-        from pymammotion.messaging.edge_saga import EdgeMappingSaga
-
         handle = self._device_registry.get_by_name(device_name)
         if handle is None:
             _logger.warning("start_edge_mapping: device '%s' not registered", device_name)
@@ -2458,10 +2514,6 @@ class MammotionClient:
         The returned Device objects have all required fields populated from the
         record; fields not present in DeviceRecord are set to sensible defaults.
         """
-        import time
-
-        from pymammotion.aliyun.model.dev_by_account_response import Device
-
         result: list[Any] = []
         for rec in records:
             try:
@@ -2538,8 +2590,6 @@ class MammotionClient:
         the video stream — mirroring the APK's ``getVideoResp`` logic.
         New-firmware devices start streaming without a device-side command.
         """
-        from pymammotion.utility.device_type import DeviceType
-
         http = self.mammotion_http
         if http is None:
             return None
@@ -2565,8 +2615,6 @@ class MammotionClient:
         the APK's refresh path (STUN-timeout, ``on_p2p_lost``) which re-runs
         the same flow as the initial join without a preceding leave command.
         """
-        from pymammotion.utility.device_type import DeviceType
-
         http = self.mammotion_http
         if http is None:
             return None

@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 import jwt
 
-from pymammotion.aliyun.exceptions import LoginException
+from pymammotion.aliyun.exceptions import AuthRefreshException, LoginException
 from pymammotion.http.model.http import MQTTConnection, UnauthorizedExceptionError
 from pymammotion.transport import AuthError
 from pymammotion.transport.base import (
@@ -143,7 +143,7 @@ class TokenManager:
         #: Integrations can wire this to persist the updated token cache.
         self.on_credentials_updated: Callable[[], Awaitable[None]] | None = None
         # Monotonic timestamps of recent 2401 "refreshToken invalid" failures.
-        # Three failures within _ALIYUN_FAILURE_WINDOW seconds → ReLoginRequiredError.
+        # _ALIYUN_FAILURE_LIMIT failures within _ALIYUN_FAILURE_WINDOW seconds → ReLoginRequiredError.
         self._aliyun_refresh_failures: list[float] = []
         # Monotonic timestamp of the last failed force_refresh_invoke_token() call.
         # Callers that hit the 30 s cooldown window get an immediate ReLoginRequiredError
@@ -428,9 +428,6 @@ class TokenManager:
             ReLoginRequiredError: If the refresh token has expired or the session cannot be renewed.
 
         """
-        from pymammotion.aliyun.exceptions import AuthRefreshException
-        from pymammotion.transport.base import SessionExpiredError
-
         if self._cloud_gateway is None:
             raise ReLoginRequiredError(self._account_id, "No Aliyun cloud gateway configured")
         try:
@@ -438,7 +435,7 @@ class TokenManager:
                 await self._cloud_gateway.check_or_refresh_session(force=True)
                 # Successful session check — clear any accumulated failure timestamps.
                 self._aliyun_refresh_failures.clear()
-            except SessionExpiredError:
+            except SessionExpiredError as session_exc:
                 # 2401 "refreshToken invalid" — track failures within a rolling window.
                 now = time.monotonic()
                 self._aliyun_refresh_failures = [
@@ -451,7 +448,7 @@ class TokenManager:
                         self._account_id,
                         f"Aliyun refreshToken rejected {self._ALIYUN_FAILURE_LIMIT} times "
                         f"within {self._ALIYUN_FAILURE_WINDOW:.0f}s — re-authentication required",
-                    )
+                    ) from session_exc
                 # refreshToken was rejected (2401) — re-run the full IoT login sequence.
                 # Do NOT return here: fall through so _aliyun_creds is updated from the
                 # newly established session.  Returning early was the bug that handed the
@@ -523,7 +520,7 @@ class TokenManager:
                 # treating it as an unrecoverable token error.
                 if is_transient_network_error(exc):
                     raise
-                raise AuthError(exc)
+                raise AuthError(exc) from exc
 
     async def force_refresh_invoke_token(self, *, allow_relogin: bool = True) -> None:
         """Reactive refresh of the HTTP bearer token after a 401 from mqtt_invoke.
@@ -572,7 +569,7 @@ class TokenManager:
                 self._invoke_refresh_failed_at = time.monotonic()
                 if is_transient_network_error(exc):
                     raise
-                raise AuthError(exc)
+                raise AuthError(exc) from exc
 
     def _set_mqtt_creds(self, data: MQTTConnection) -> MQTTCredentials:
         """Store MQTTConnection data into self._mqtt_creds and return it.
@@ -644,14 +641,20 @@ class TokenManager:
                 if response.data is None:
                     raise AuthError("get_mqtt_credentials after authz refresh returned no data")
                 self._set_mqtt_creds(response.data)
-            except (Exception, AuthError):
+            except Exception:
                 # Authorization code refresh also failed — fall back to a full HTTP re-login.
                 try:
                     await self.refresh_http()
                     await self._http.refresh_authorization_token()
                     response = await self._http.get_mqtt_credentials()
-                    if response.data is not None:
-                        self._set_mqtt_creds(response.data)
+                    if response.data is None:
+                        # Do NOT fall through to return the old (expired) snapshot —
+                        # that persists stale creds and loops 401 → refresh → 401,
+                        # with each pass potentially rotating refresh tokens server-side.
+                        raise ReLoginRequiredError(
+                            self._account_id, "get_mqtt_credentials after full re-login returned no data"
+                        )
+                    self._set_mqtt_creds(response.data)
                 except ReLoginRequiredError:
                     raise
                 except Exception as exc:
