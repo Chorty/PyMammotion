@@ -31,10 +31,16 @@ from pymammotion.messaging.saga import SagaFailedError
 def _make_hash_list_ack_response(
     total_frame: int = 1,
     current_frame: int = 1,
-    sub_cmd: int = 1,
+    sub_cmd: int = 0,
     data_couple: list[int] | None = None,
 ) -> MagicMock:
-    """Create a minimal MagicMock that looks like a LubaMsg with toapp_gethash_ack."""
+    """Create a minimal MagicMock that looks like a LubaMsg with toapp_gethash_ack.
+
+    ``sub_cmd`` defaults to 0 because the root hash list is requested with
+    ``get_all_boundary_hash_list(sub_cmd=0)`` and MapFetchSaga now filters the
+    ``toapp_gethash_ack`` stream to ``sub_cmd == 0`` (rejecting stray sub_cmd=3
+    line-hash frames from an interrupted MowPathSaga).
+    """
     ack = MagicMock()
     ack.pver = 1
     ack.sub_cmd = sub_cmd
@@ -140,7 +146,7 @@ async def test_map_saga_fetches_area_names_for_non_luba1() -> None:
     builder = _make_command_builder()
 
     area_response = _make_area_name_response([(1, "Front lawn")])
-    # sub_cmd=1 (default) → missing_hashlist(0) returns [] so step 4 is skipped
+    # Empty map (get_map=HashList) → missing_hashlist(0) returns [] so step 4 is skipped
     hash_response = _make_hash_list_ack_response(total_frame=1, current_frame=1, data_couple=[])
 
     broker.send_and_wait.return_value = area_response

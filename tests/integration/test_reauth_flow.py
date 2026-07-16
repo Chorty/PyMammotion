@@ -116,7 +116,7 @@ async def test_refresh_mqtt_creds_authcode_fallback_raises_relogin_when_credenti
     tm = TokenManager("acc", http)
     await tm.initialize(None, None, None)
 
-    with pytest.raises(ReLoginRequiredError, match="MQTT credentials unavailable"):
+    with pytest.raises(ReLoginRequiredError, match="full re-login returned no data"):
         await tm.get_mammotion_mqtt_credentials()
 
     # refresh_authorization_token called in both the first tier and the fallback tier
