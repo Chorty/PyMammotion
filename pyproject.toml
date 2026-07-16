@@ -10,7 +10,7 @@ authors = [
     { name = "Michael Arthur", email = "michael@jumblesoft.co.nz" },
     { name = "jLynx" },
 ]
-requires-python = ">=3.13,<=3.15"
+requires-python = ">=3.13"
 readme = "README.md"
 license = "GPL-3.0"
 dependencies = [
