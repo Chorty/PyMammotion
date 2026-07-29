@@ -87,6 +87,10 @@ _STALE_GATT_TABLE_CODES = frozenset({_GATT_INVALID_HANDLE, _GATT_ILLEGAL_PARAMET
 #: the cached GATT table over a live link, and one to rediscover afterwards.
 _MAX_CONNECT_PASSES = 3
 
+#: Upper bound on one teardown ``disconnect()``: a wedged proxy must not hold up the
+#: failure path that is trying to release it.
+_DISCONNECT_TIMEOUT_SECONDS = 2.0
+
 
 def _gatt_status_code(exc: BaseException) -> int | None:
     """Return the numeric GATT status behind *exc*, or None when it carries none.
@@ -322,6 +326,13 @@ class BLETransport(Transport):
             connected = False
             try:
                 connected = await self._connect_passes(self._ble_device)
+            except BaseException:
+                # Once establish_connection returns, every setup failure must release
+                # the proxy/adapter slot.  The anticipated failures already tore down;
+                # this catches the rest — a cancellation or a non-transport error — so
+                # neither can strand a live client.  BaseException is deliberate.
+                await self._teardown_client()
+                raise
             finally:
                 # Announced here rather than at each raise so an unanticipated exception
                 # or a cancellation cannot strand availability at CONNECTING.  Runs before
@@ -479,10 +490,21 @@ class BLETransport(Transport):
         return bool(reached_adapter)
 
     async def _teardown_client(self) -> None:
-        """Drop the current client, indifferent to how the link died."""
+        """Drop the current client, indifferent to how the link died.
+
+        Always attempts the disconnect: ``is_connected`` is not a reliable gate, since
+        a backend can report False while still holding a proxy or adapter slot.  The
+        attempt is time-bounded, and its errors are logged and suppressed so a caller
+        handling another failure re-raises that one, not a cleanup error.
+        """
         if self._client is not None:
-            with contextlib.suppress(Exception):
-                await self._client.disconnect()
+            try:
+                async with asyncio.timeout(_DISCONNECT_TIMEOUT_SECONDS):
+                    await self._client.disconnect()
+            except BaseException as exc:  # noqa: BLE001 — cleanup must not replace an in-flight failure
+                _logger.warning(
+                    "BLETransport[%s]: failed to disconnect during teardown: %s", self._config.device_id, exc
+                )
         self._client = None
         self._message = None
 
@@ -562,13 +584,7 @@ class BLETransport(Transport):
 
     async def disconnect(self) -> None:
         """Gracefully disconnect the BLE client."""
-        if self._client is not None and self._client.is_connected:
-            try:
-                await self._client.disconnect()
-            except BleakError as exc:
-                _logger.warning("BLETransport[%s]: failed to disconnect: %s", self._config.device_id, exc)
-        self._client = None
-        self._message = None
+        await self._teardown_client()
         await self._notify_availability(TransportAvailability.DISCONNECTED)
 
     async def _write_payload(self, payload: bytes) -> None:
@@ -592,16 +608,15 @@ class BLETransport(Transport):
             try:
                 await self._message.post_custom_data_bytes(payload)
             except (TimeoutError, BleakError, OSError) as exc:
-                # Clear client refs immediately so is_connected returns False
-                # before _on_disconnect_async runs — prevents the ble_loop from
-                # retrying against a known-dead connection (GATT error 133 etc.).
-                self._client = None
-                self._message = None
+                # Release the live link before dropping the reference — otherwise the
+                # proxy/adapter slot stays occupied while this transport reports itself
+                # disconnected.  Refs are cleared before _on_disconnect_async runs, so
+                # the ble_loop does not retry a known-dead connection (GATT error 133).
+                await self._teardown_client()
                 await self._notify_availability(TransportAvailability.DISCONNECTED)
                 raise TransportError(f"BLE send failed for {self._config.device_id!r}: {exc}") from exc
             if not self._client.is_connected:
-                self._client = None
-                self._message = None
+                await self._teardown_client()
                 await self._notify_availability(TransportAvailability.DISCONNECTED)
                 raise TransportError(
                     f"BLE send failed for {self._config.device_id!r}: client disconnected during write"
