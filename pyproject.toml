@@ -4,7 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pymammotion"
-version = "0.8.12"
+# Fork build: released 0.8.12 plus the audited BLE fixes, not an upstream
+# release. PEP 440 sorts a post-release above 0.8.12, so pip will never
+# silently replace it with plain 0.8.12 from PyPI, and the number cannot
+# collide with a future upstream release. Set by hand: [tool.bumpver] below
+# restricts versions to MAJOR.MINOR.PATCH and cannot express a post segment,
+# so do not run bumpver on this branch.
+version = "0.8.12.post1"
 description = ""
 authors = [
     { name = "Michael Arthur", email = "michael@jumblesoft.co.nz" },
