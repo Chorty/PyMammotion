@@ -96,6 +96,10 @@ async def mqtt_activity_loop(handle: LoopHost) -> None:
         mode = handle.cadence_mode()
         interval = poll_interval(handle, mode)
 
+        if handle.exclusive_report_subscription_active is True:
+            await handle.sleep_or_rearm(0.1)
+            continue
+
         # While the BLE polling loop owns a continuous stream, this loop
         # has nothing useful to do — fresh state is arriving over BLE.
         if handle.ble_stream_active:
