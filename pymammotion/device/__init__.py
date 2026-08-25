@@ -1,6 +1,7 @@
 """Device handle and registry for PyMammotion."""
 
 from pymammotion.device.handle import DeviceHandle, DeviceRegistry
+from pymammotion.device.position import PositionSample, PositionSampleStream
 from pymammotion.device.state_reducer import MowerStateReducer, PoolStateReducer, StateReducer, get_state_reducer
 
 __all__ = [
@@ -8,6 +9,8 @@ __all__ = [
     "DeviceRegistry",
     "MowerStateReducer",
     "PoolStateReducer",
+    "PositionSample",
+    "PositionSampleStream",
     "StateReducer",
     "get_state_reducer",
 ]

@@ -7,6 +7,7 @@ import base64
 import contextlib
 import dataclasses
 import logging
+import math
 import time
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
@@ -20,6 +21,7 @@ from pymammotion.device.ble_loop import ble_activity_loop, ble_polling_loop
 from pymammotion.device.dynamics_line_loop import dynamics_line_loop
 from pymammotion.device.modes import _DeviceMode
 from pymammotion.device.mqtt_loop import mqtt_activity_loop, poll_interval
+from pymammotion.device.position import PositionSample, PositionSampleStream
 from pymammotion.device.state_reducer import StateReducer, get_state_reducer
 from pymammotion.mammotion.commands.mammotion_command import MammotionCommand
 from pymammotion.messaging.broker import DeviceMessageBroker
@@ -73,7 +75,7 @@ _REPORT_CHANNELS: list[RptInfoType] = [
 ]
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable
 
     from pymammotion.data.model.device import Device, MowingDevice
     from pymammotion.data.mqtt.event import ThingEventMessage
@@ -273,6 +275,16 @@ class DeviceHandle:
         #: Monotonic timestamp of the last successfully-parsed inbound LubaMsg.
         #: Used by ensure_fresh_state to decide whether a snapshot poll is needed.
         self._last_report_at: float = 0.0
+        #: Position-payload sequence is independent of DeviceSnapshot.sequence:
+        #: identical position payloads are evidence even when model values do not change.
+        self._position_sequence: int = 0
+        #: Invalidates evidence across transport teardown/replacement boundaries.
+        self._position_epoch: int = 0
+        self._position_streams: set[PositionSampleStream] = set()
+        self._latest_position_sample: PositionSample | None = None
+        self._position_samples_dropped_total: int = 0
+        #: True only while an isolated diagnostic owns report-stream config.
+        self._exclusive_report_subscription: bool = False
         #: Snapshot of the previous active_transport selection / availability so
         #: the DEBUG log can suppress repeats — only the transitions matter.
         #: Tuple of (selection_path, prefer_ble, ble_usable, mqtt_usable).
@@ -329,10 +341,20 @@ class DeviceHandle:
         """Create a per-transport availability callback."""
 
         async def _handler(state: TransportAvailability) -> None:
+            previous = (
+                self._availability.ble
+                if transport_type == TransportType.BLE
+                else self._availability.mqtt
+            )
             # Don't pass mqtt_reported_offline — the default (None) preserves the existing
             # flag.  Listener fires on every transport flap; we must not infer the offline
             # state from the flap itself, only from cloud "offline" reports / inbound frames.
             self.update_availability(transport_type, state)
+            if (
+                state == TransportAvailability.DISCONNECTED
+                and previous != TransportAvailability.DISCONNECTED
+            ):
+                self._advance_position_epoch()
             if transport_type == TransportType.BLE:
                 if state == TransportAvailability.CONNECTED:
                     # BLE arriving while MQTT is reconnecting provides a fallback send path —
@@ -506,6 +528,7 @@ class DeviceHandle:
         """
         existing = self._transports.get(transport.transport_type)
         if existing is not None:
+            self._advance_position_epoch()
             _logger.debug("add_transport '%s': replacing existing %s", self.device_name, transport.transport_type.value)
             await existing.disconnect()
         _logger.debug("add_transport '%s': registered %s", self.device_name, transport.transport_type.value)
@@ -515,6 +538,7 @@ class DeviceHandle:
         """Disconnect and remove a transport by type."""
         transport = self._transports.pop(transport_type, None)
         if transport is not None:
+            self._advance_position_epoch()
             await transport.disconnect()
 
     def detach_transport(self, transport_type: TransportType) -> Transport | None:
@@ -526,7 +550,193 @@ class DeviceHandle:
         disconnects and so must NOT be used for shared transports.  Returns the
         removed transport, or ``None`` if it was not registered (idempotent).
         """
-        return self._transports.pop(transport_type, None)
+        transport = self._transports.pop(transport_type, None)
+        if transport is not None:
+            self._advance_position_epoch()
+        return transport
+
+    @staticmethod
+    def _position_payload_source(message: LubaMsg) -> str | None:
+        """Identify position-bearing protobuf variants without reading cached state."""
+        sys = message.sys
+        if sys is None:
+            return None
+        report = sys.toapp_report_data
+        if report is not None and report.locations:
+            return "report_data.locations[0]"
+        rapid = sys.system_tard_state_tunnel
+        if rapid is not None and len(rapid.tard_state_data) >= 12:
+            return "mowing_state"
+        return None
+
+    @staticmethod
+    def _position_sample_values(
+        snapshot: DeviceSnapshot,
+        source: str,
+    ) -> tuple[
+        float | None,
+        float | None,
+        float | None,
+        int | None,
+        int | None,
+        int | None,
+        int | None,
+    ]:
+        """Extract normalized map-local position values from a reduced snapshot."""
+        raw = snapshot.raw
+        if source == "report_data.locations[0]":
+            report_data = getattr(raw, "report_data", None)
+            locations = getattr(report_data, "locations", None) or []
+            if not locations:
+                return (None, None, None, None, None, None, None)
+            location = locations[0]
+            rtk = getattr(report_data, "rtk", None)
+            reduced_location = getattr(raw, "location", None)
+            return (
+                float(location.real_pos_x) / 10_000,
+                float(location.real_pos_y) / 10_000,
+                float(location.real_toward) / 10_000,
+                int(location.pos_type),
+                int(getattr(reduced_location, "work_zone", 0)),
+                int(getattr(rtk, "status", 0)),
+                int(getattr(rtk, "pos_level", 0)),
+            )
+        rapid = getattr(raw, "mowing_state", None)
+        if rapid is None:
+            return (None, None, None, None, None, None, None)
+        rtk_status = getattr(rapid, "rtk_status", None)
+        rtk_status_value = getattr(rtk_status, "value", rtk_status)
+        return (
+            float(rapid.pos_x),
+            float(rapid.pos_y),
+            float(rapid.toward),
+            int(rapid.pos_type),
+            int(rapid.zone_hash),
+            int(rtk_status_value) if rtk_status_value is not None else None,
+            int(rapid.pos_level),
+        )
+
+    @staticmethod
+    def _position_rejection_reason(
+        x: float | None,
+        y: float | None,
+        pos_type: int | None,
+        zone_hash: int | None,
+        rtk_status: int | None,
+    ) -> str | None:
+        """Return why a sample is not admissible for guarded motion."""
+        if x is None or y is None or not math.isfinite(x) or not math.isfinite(y):
+            return "position_non_finite"
+        if x == 0.0 and y == 0.0:
+            return "position_zero_pose"
+        if pos_type in (None, 0):
+            return "position_outside_area"
+        if zone_hash in (None, 0):
+            return "zone_hash_unavailable"
+        if rtk_status != 4:
+            return "rtk_not_fixed"
+        return None
+
+    def _publish_position_sample(
+        self,
+        snapshot: DeviceSnapshot,
+        *,
+        source: str,
+        transport_type: TransportType,
+        received_at: float,
+        decoded_at: float,
+        broker_completed_at: float,
+        reducer_completed_at: float,
+        state_applied_at: float,
+    ) -> None:
+        """Publish one immutable post-reducer position sample to every stream."""
+        x, y, toward, pos_type, zone_hash, rtk_status, pos_level = self._position_sample_values(
+            snapshot, source
+        )
+        rejection_reason = self._position_rejection_reason(
+            x, y, pos_type, zone_hash, rtk_status
+        )
+        self._position_sequence += 1
+        published_at = time.monotonic()
+        sample = PositionSample(
+            sequence=self._position_sequence,
+            epoch=self._position_epoch,
+            x=x,
+            y=y,
+            toward=toward,
+            pos_type=pos_type,
+            zone_hash=zone_hash,
+            rtk_status=rtk_status,
+            pos_level=pos_level,
+            source=source,
+            transport=transport_type.value,
+            received_at_monotonic=received_at,
+            decoded_at_monotonic=decoded_at,
+            broker_completed_at_monotonic=broker_completed_at,
+            reducer_completed_at_monotonic=reducer_completed_at,
+            state_applied_at_monotonic=state_applied_at,
+            published_at_monotonic=published_at,
+            valid_for_motion=rejection_reason is None,
+            rejection_reason=rejection_reason,
+        )
+        self._latest_position_sample = sample
+        for stream in tuple(self._position_streams):
+            if stream._offer(sample):  # noqa: SLF001 - paired stream implementation
+                self._position_samples_dropped_total += 1
+
+    def _advance_position_epoch(self) -> None:
+        """Invalidate all queued position evidence after a transport boundary."""
+        self._position_epoch += 1
+        for stream in tuple(self._position_streams):
+            stream._invalidate()  # noqa: SLF001 - paired stream implementation
+
+    def _remove_position_stream(self, stream: PositionSampleStream) -> None:
+        """Remove a closed position stream from this handle."""
+        self._position_streams.discard(stream)
+
+    def open_position_sample_stream(self, maxsize: int = 1) -> PositionSampleStream:
+        """Return a bounded stream containing only newly published positions."""
+        stream = PositionSampleStream(
+            maxsize=maxsize,
+            unsubscribe=self._remove_position_stream,
+        )
+        self._position_streams.add(stream)
+        return stream
+
+    @property
+    def exclusive_report_subscription_active(self) -> bool:
+        """Return whether a diagnostic exclusively owns report configuration."""
+        return self._exclusive_report_subscription
+
+    @contextlib.asynccontextmanager
+    async def exclusive_report_subscription(self) -> AsyncIterator[None]:
+        """Temporarily suppress background report-stream reconfiguration."""
+        if self._exclusive_report_subscription:
+            raise RuntimeError("report subscription already has an exclusive owner")
+        self._exclusive_report_subscription = True
+        try:
+            if self._ble_stream_active:
+                await self._enqueue_ble_stream_command(RptAct.RPT_STOP, count=1)
+                self._ble_stream_active = False
+            yield
+        finally:
+            self._exclusive_report_subscription = False
+            self._rearm_event.set()
+
+    @property
+    def latest_position_sample(self) -> PositionSample | None:
+        """Return the latest immutable position payload, if any."""
+        return self._latest_position_sample
+
+    @property
+    def position_epoch(self) -> int:
+        """Return the current position-evidence connection epoch."""
+        return self._position_epoch
+
+    @property
+    def position_samples_dropped_total(self) -> int:
+        """Return total samples replaced across all latest-wins streams."""
+        return self._position_samples_dropped_total
 
     async def on_raw_message(self, payload: bytes, transport_type: TransportType = TransportType.CLOUD_ALIYUN) -> None:
         """Receive raw bytes from transport, decode, update state, route to broker.
@@ -545,6 +755,10 @@ class DeviceHandle:
           4. Apply LubaMsg to state via StateReducer
           5. Update DeviceStateMachine and emit the new snapshot
         """
+        # Receipt is stamped before parsing and debug rendering so software work
+        # cannot masquerade as device/transport latency.
+        received_at = time.monotonic()
+
         # 1. Parse bytes → LubaMsg
         try:
             luba_msg = LubaMsg().parse(payload)
@@ -565,11 +779,14 @@ class DeviceHandle:
             _logger.debug("← %s  ignored non-LubaMsg BLE notification (%d bytes)", self.device_name, len(payload))
             return
 
-        try:
-            _logger.debug("← %s  %s", self.device_name, luba_msg.to_dict(include_default_values=False))
-        except (ValueError, KeyError):
-            _logger.debug("← %s  <unparseable protobuf — unknown enum value>", self.device_name)
-        self._last_report_at = time.monotonic()
+        decoded_at = time.monotonic()
+        self._last_report_at = decoded_at
+        position_source = self._position_payload_source(luba_msg)
+        if _logger.isEnabledFor(logging.DEBUG):
+            try:
+                _logger.debug("← %s  %s", self.device_name, luba_msg.to_dict(include_default_values=False))
+            except (ValueError, KeyError):
+                _logger.debug("← %s  <unparseable protobuf — unknown enum value>", self.device_name)
 
         if self._availability.mqtt_reported_offline and transport_type != TransportType.BLE:
             self.update_availability(transport_type, self._availability.mqtt, mqtt_reported_offline=False)
@@ -581,6 +798,7 @@ class DeviceHandle:
         # state_changed subscribers) or saga ack latency stretches into
         # seconds per frame and map fetches take minutes.
         await self.broker.on_message(luba_msg)
+        broker_completed_at = time.monotonic()
 
         # 4. Apply to state via reducer (returns a new MowingDevice copy).
         # A corrupt frame can parse as a LubaMsg yet carry a field of the wrong
@@ -608,11 +826,24 @@ class DeviceHandle:
                 exc_info=True,
             )
             return
+        reducer_completed_at = time.monotonic()
 
         # 5. Update state machine and emit if anything in the model changed.
         # _diff now walks `raw`, so deep-field mutations (e.g.
         # report_data.dev.sys_status) correctly produce a non-empty `changed`.
         snapshot, changed = self.state_machine.apply(updated_device, self._availability)
+        state_applied_at = time.monotonic()
+        if position_source is not None and not self._stopping:
+            self._publish_position_sample(
+                snapshot,
+                source=position_source,
+                transport_type=transport_type,
+                received_at=received_at,
+                decoded_at=decoded_at,
+                broker_completed_at=broker_completed_at,
+                reducer_completed_at=reducer_completed_at,
+                state_applied_at=state_applied_at,
+            )
         if changed and not self._stopping:
             await self._state_changed_bus.emit(snapshot)
 
@@ -1101,6 +1332,8 @@ class DeviceHandle:
         self._dynamics_line_task = None
         self._ble_connect_task = None
         self._ble_stream_active = False
+        for stream in tuple(self._position_streams):
+            stream.close()
         await self.queue.stop()
         await self.broker.close()
         await self._state_changed_bus.stop()

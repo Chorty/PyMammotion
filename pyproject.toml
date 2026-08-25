@@ -10,7 +10,7 @@ name = "pymammotion"
 # collide with a future upstream release. Set by hand: [tool.bumpver] below
 # restricts versions to MAJOR.MINOR.PATCH and cannot express a post segment,
 # so do not run bumpver on this branch.
-version = "0.8.12.post1"
+version = "0.8.12.post2"
 description = ""
 authors = [
     { name = "Michael Arthur", email = "michael@jumblesoft.co.nz" },
