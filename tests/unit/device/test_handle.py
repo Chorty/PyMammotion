@@ -566,14 +566,80 @@ async def test_exclusive_report_subscription_stops_and_restores_background_owner
     handle.ble_stream_active = True
     handle._enqueue_ble_stream_command = AsyncMock()  # type: ignore[method-assign]
 
-    async with handle.exclusive_report_subscription():
+    async with handle.exclusive_report_subscription("cadence-probe") as lease:
         assert handle.exclusive_report_subscription_active is True
+        assert handle.report_subscription_owner == "cadence-probe"
+        assert lease.owner == "cadence-probe"
+        # The quiescing STOP is enqueued, never confirmed: the lease reports
+        # intent, and only a position payload inside a generation proves the
+        # configuration is live.
+        assert lease.background_stop_enqueued is True
         assert handle.ble_stream_active is False
+
+        generation = handle.begin_report_subscription_generation(lease)
+        assert generation.lease_id == lease.lease_id
+        assert generation.generation == 1
+        assert generation.baseline_position_sequence == 0
+        assert generation.baseline_position_epoch == 0
 
     handle._enqueue_ble_stream_command.assert_awaited_once_with(  # type: ignore[attr-defined]
         RptAct.RPT_STOP, count=1
     )
     assert handle.exclusive_report_subscription_active is False
+    assert handle.report_subscription_owner is None
+    with pytest.raises(RuntimeError, match="no longer current"):
+        handle.begin_report_subscription_generation(lease)
+
+
+async def test_report_subscription_leases_are_serialized() -> None:
+    """A second report owner waits instead of racing the first owner."""
+    handle = make_handle()
+    first_entered = asyncio.Event()
+    release_first = asyncio.Event()
+    second_entered = asyncio.Event()
+
+    async def _first() -> None:
+        async with handle.exclusive_report_subscription("first"):
+            first_entered.set()
+            await release_first.wait()
+
+    async def _second() -> None:
+        async with handle.exclusive_report_subscription("second"):
+            second_entered.set()
+
+    first_task = asyncio.create_task(_first())
+    await first_entered.wait()
+    second_task = asyncio.create_task(_second())
+    await asyncio.sleep(0)
+    assert second_entered.is_set() is False
+    assert handle.report_subscription_owner == "first"
+
+    release_first.set()
+    await asyncio.gather(first_task, second_task)
+    assert second_entered.is_set() is True
+    assert handle.report_subscription_owner is None
+
+
+async def test_cancelled_report_subscription_releases_and_rearms_once() -> None:
+    """Cancellation cannot strand ownership or duplicate background rearms."""
+    handle = make_handle()
+    handle._rearm_event = MagicMock()  # type: ignore[assignment]
+    entered = asyncio.Event()
+
+    async def _owner() -> None:
+        async with handle.exclusive_report_subscription("cancelled"):
+            entered.set()
+            await asyncio.Future()
+
+    task = asyncio.create_task(_owner())
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert handle.exclusive_report_subscription_active is False
+    assert handle.report_subscription_owner is None
+    handle._rearm_event.set.assert_called_once_with()  # type: ignore[attr-defined]
 
 
 async def test_rapid_state_position_payload_is_published_after_reduction() -> None:

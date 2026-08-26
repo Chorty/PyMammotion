@@ -96,3 +96,37 @@ class PositionSampleStream:
     def __exit__(self, *_args: object) -> None:
         """Close this stream on context-manager exit."""
         self.close()
+
+
+@dataclass(frozen=True, slots=True)
+class ReportSubscriptionLease:
+    """Exclusive ownership of one device's report-subscription configuration.
+
+    ``background_stop_enqueued_at_monotonic`` is when the quiescing ``RPT_STOP``
+    was placed on the device command queue -- NOT when the device acknowledged
+    it, and NOT proof that background reporting has stopped.
+    ``DeviceCommandQueue.enqueue`` returns as soon as the item is queued, a
+    ``BACKGROUND`` item is dropped outright while a saga is active, and the send
+    is skipped when no BLE transport is connected.  Treat this field as evidence
+    of intent; the only positive evidence that a configuration is live is a
+    position payload inside a :class:`ReportSubscriptionGeneration`.
+    """
+
+    owner: str
+    lease_id: int
+    acquired_at_monotonic: float
+    background_stop_enqueued: bool
+    background_stop_enqueued_at_monotonic: float
+
+
+@dataclass(frozen=True, slots=True)
+class ReportSubscriptionGeneration:
+    """Evidence boundary for one report configuration within an active lease."""
+
+    owner: str
+    lease_id: int
+    generation: int
+    requested_at_monotonic: float
+    baseline_position_sequence: int
+    baseline_position_epoch: int
+    baseline_last_report_at: float

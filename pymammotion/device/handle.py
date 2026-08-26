@@ -21,7 +21,12 @@ from pymammotion.device.ble_loop import ble_activity_loop, ble_polling_loop
 from pymammotion.device.dynamics_line_loop import dynamics_line_loop
 from pymammotion.device.modes import _DeviceMode
 from pymammotion.device.mqtt_loop import mqtt_activity_loop, poll_interval
-from pymammotion.device.position import PositionSample, PositionSampleStream
+from pymammotion.device.position import (
+    PositionSample,
+    PositionSampleStream,
+    ReportSubscriptionGeneration,
+    ReportSubscriptionLease,
+)
 from pymammotion.device.state_reducer import StateReducer, get_state_reducer
 from pymammotion.mammotion.commands.mammotion_command import MammotionCommand
 from pymammotion.messaging.broker import DeviceMessageBroker
@@ -283,8 +288,13 @@ class DeviceHandle:
         self._position_streams: set[PositionSampleStream] = set()
         self._latest_position_sample: PositionSample | None = None
         self._position_samples_dropped_total: int = 0
-        #: True only while an isolated diagnostic owns report-stream config.
-        self._exclusive_report_subscription: bool = False
+        #: Serializes every temporary owner of report-subscription configuration.
+        #: The lock is held across the lease so owners cannot interleave commands.
+        self._report_subscription_lock: asyncio.Lock = asyncio.Lock()
+        self._report_subscription_owner: str | None = None
+        self._report_subscription_lease_id: int = 0
+        self._report_subscription_generation: int = 0
+        self._active_report_subscription_lease: ReportSubscriptionLease | None = None
         #: Snapshot of the previous active_transport selection / availability so
         #: the DEBUG log can suppress repeats — only the transitions matter.
         #: Tuple of (selection_path, prefer_ble, ble_usable, mqtt_usable).
@@ -706,22 +716,87 @@ class DeviceHandle:
     @property
     def exclusive_report_subscription_active(self) -> bool:
         """Return whether a diagnostic exclusively owns report configuration."""
-        return self._exclusive_report_subscription
+        # Set before the quiescing STOP is enqueued, so no background loop
+        # iteration that has yet to reach its guard can start a configuration
+        # inside the lease.  It cannot preempt an iteration already past that
+        # guard -- see exclusive_report_subscription for the full boundary.
+        return self._report_subscription_owner is not None
+
+    @property
+    def report_subscription_owner(self) -> str | None:
+        """Return the current exclusive report owner, if any."""
+        return self._report_subscription_owner
+
+    @property
+    def report_subscription_generation(self) -> int:
+        """Return the most recently allocated report-configuration generation."""
+        return self._report_subscription_generation
+
+    def report_subscription_lease_is_current(
+        self, lease: ReportSubscriptionLease
+    ) -> bool:
+        """Return whether *lease* still exclusively owns report configuration."""
+        return self._active_report_subscription_lease is lease
+
+    def begin_report_subscription_generation(
+        self, lease: ReportSubscriptionLease
+    ) -> ReportSubscriptionGeneration:
+        """Allocate an evidence boundary for one report START under *lease*."""
+        if not self.report_subscription_lease_is_current(lease):
+            raise RuntimeError("report subscription lease is no longer current")
+        self._report_subscription_generation += 1
+        return ReportSubscriptionGeneration(
+            owner=lease.owner,
+            lease_id=lease.lease_id,
+            generation=self._report_subscription_generation,
+            requested_at_monotonic=time.monotonic(),
+            baseline_position_sequence=self._position_sequence,
+            baseline_position_epoch=self._position_epoch,
+            baseline_last_report_at=self._last_report_at,
+        )
 
     @contextlib.asynccontextmanager
-    async def exclusive_report_subscription(self) -> AsyncIterator[None]:
-        """Temporarily suppress background report-stream reconfiguration."""
-        if self._exclusive_report_subscription:
-            raise RuntimeError("report subscription already has an exclusive owner")
-        self._exclusive_report_subscription = True
-        try:
-            if self._ble_stream_active:
-                await self._enqueue_ble_stream_command(RptAct.RPT_STOP, count=1)
-                self._ble_stream_active = False
-            yield
-        finally:
-            self._exclusive_report_subscription = False
-            self._rearm_event.set()
+    async def exclusive_report_subscription(
+        self, owner: str = "diagnostic"
+    ) -> AsyncIterator[ReportSubscriptionLease]:
+        """Serialize temporary report configuration and stop background renewals.
+
+        The owner flag is set before the quiescing ``RPT_STOP`` so no *new*
+        background loop iteration starts a configuration inside the lease.  It
+        does NOT preempt an iteration already past that guard, and the STOP is
+        only enqueued -- ``DeviceCommandQueue.enqueue`` returns on queueing, and
+        a ``BACKGROUND`` item is dropped while a saga is active.  So the lease
+        serializes ownership; it does not by itself prove the device has gone
+        quiet.  Callers must take that proof from a position payload inside a
+        :class:`ReportSubscriptionGeneration`.
+        """
+        if not owner:
+            raise ValueError("report subscription owner must not be empty")
+        async with self._report_subscription_lock:
+            self._report_subscription_lease_id += 1
+            acquired_at = time.monotonic()
+            self._report_subscription_owner = owner
+            try:
+                # Enqueue the quiescing STOP after blocking new background renewals.
+                background_stop_enqueued = False
+                if self._ble_stream_active:
+                    await self._enqueue_ble_stream_command(RptAct.RPT_STOP, count=1)
+                    self._ble_stream_active = False
+                    background_stop_enqueued = True
+                lease = ReportSubscriptionLease(
+                    owner=owner,
+                    lease_id=self._report_subscription_lease_id,
+                    acquired_at_monotonic=acquired_at,
+                    background_stop_enqueued=background_stop_enqueued,
+                    background_stop_enqueued_at_monotonic=time.monotonic(),
+                )
+                self._active_report_subscription_lease = lease
+                yield lease
+            finally:
+                self._active_report_subscription_lease = None
+                self._report_subscription_owner = None
+                # Exactly one rearm transition occurs per released lease.
+                self._rearm_event.set()
 
     @property
     def latest_position_sample(self) -> PositionSample | None:
