@@ -16,6 +16,7 @@ from pymammotion.proto import (
     DebugEnableT,
     DebugResCfgAbilityT,
     DeviceProductTypeInfoT,
+    DevLowPowerGet,
     FileTransferResponse,
     FileTransferResult,
     LoraCfgReq,
@@ -208,6 +209,24 @@ class MessageSystem(AbstractMessage, ABC):
     def get_device_version_info(self) -> bytes:
         """Request the device firmware version information."""
         return self.send_order_msg_sys(MctlSys(todev_get_dev_fw_info=1))
+
+    def get_device_low_power(self) -> bytes:
+        """Request the device's low-power switch settings (on-dock and off-dock).
+
+        Mirrors the vendor app, which sends ``to_get_dev_low_power_cmd`` with a
+        ``dev_low_power_get`` whose single field is 0 -- once for the on-dock
+        switch (``charging_low_power``) and once for the off-dock switch
+        (``uncharging_low_power``). Proto3 omits zero-valued scalars, so BOTH app
+        requests serialize to the same bytes: an empty submessage whose oneof
+        presence is still encoded (``820500``). Only the app's local request id
+        differs, so one builder covers both. The vendor app reads the reply from
+        the same ``to_get_dev_low_power_cmd`` field.
+
+        Read-only. The matching SET (``to_set_dev_low_power_cmd``) is deliberately
+        not built here: it changes device power behaviour and needs its own
+        decision.
+        """
+        return self.send_order_msg_sys(MctlSys(to_get_dev_low_power_cmd=DevLowPowerGet()))
 
     def read_and_set_rtk_pairing_code(self, op: int, cfg: str) -> bytes:
         """Read or write the RTK base station LoRa pairing configuration string."""
