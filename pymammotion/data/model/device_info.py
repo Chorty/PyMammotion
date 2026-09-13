@@ -68,6 +68,12 @@ class MowerInfo(DataClassORJSONMixin):
     boundary_ride_distance: int = 0  # ID 10 — % of boundary to ride before mowing: 0, 25, or 50
     travel_speed: float = 0.0
     lora_config: str = ""
+    #: Reply to ``to_get_dev_low_power_cmd``: the on-dock (charging) and off-dock
+    #: (uncharging) low-power switches. ``None`` until a reply has been received.
+    #: Proto3 omits zero-valued scalars, so an explicit 0 in a reply cannot be told
+    #: apart from a field the device did not report.
+    charging_low_power: int | None = None
+    uncharging_low_power: int | None = None
     audio: AudioSettings = field(default_factory=AudioSettings)
     model: str = ""
     swversion: str = ""

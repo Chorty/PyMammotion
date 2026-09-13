@@ -56,6 +56,7 @@ from pymammotion.proto import (
     CoverPathUploadT,
     DeviceFwInfo,
     DeviceProductTypeInfoT,
+    DevLowPowerGet,
     DrvDevInfoResp,
     DrvDevInfoResult,
     DrvKnifeChangeReport,
@@ -246,6 +247,7 @@ class MowerStateReducer(StateReducer):
                         | "todev_time_ctrl_light"
                         | "toapp_lora_cfg_rsp"
                         | "device_product_type_info"
+                        | "to_get_dev_low_power_cmd"
                     ):
                         # These handlers only touch mower_state.
                         device.mower_state = copy.deepcopy(current.mower_state)
@@ -523,6 +525,12 @@ class MowerStateReducer(StateReducer):
             case "toapp_lora_cfg_rsp":
                 lora_cfg: LoraCfgRsp = sys_msg[1]  # type: ignore
                 device.mower_state.lora_config = lora_cfg.cfg
+            case "to_get_dev_low_power_cmd":
+                # Reply to MessageSystem.get_device_low_power(). The vendor app reads
+                # both switches from this same field.
+                low_power: DevLowPowerGet = sys_msg[1]  # type: ignore
+                device.mower_state.charging_low_power = low_power.charging_low_power
+                device.mower_state.uncharging_low_power = low_power.uncharging_low_power
             case "device_product_type_info":
                 device_product_type: DeviceProductTypeInfoT = sys_msg[1]  # type: ignore
                 if device_product_type.main_product_type != "" or device_product_type.sub_product_type != "":
