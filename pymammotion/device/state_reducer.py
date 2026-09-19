@@ -46,6 +46,7 @@ from pymammotion.data.model.pool_state import (
 )
 from pymammotion.data.model.report_info import BaseScore
 from pymammotion.data.model.work import CurrentTaskSettings
+from pymammotion.data.mqtt.mammotion_properties import DeviceOtherInfo
 from pymammotion.data.mqtt.properties import OTAProgressItems
 from pymammotion.proto import (
     AppDownlinkCmdT,
@@ -720,6 +721,9 @@ class MowerStateReducer(StateReducer):
                     device.report_data.dev.mileage = int(mileage)
                 if (wt_sec := info.get("wt_sec")) is not None:
                     device.report_data.dev.work_time_sec = int(wt_sec)
+                device.device_other_info = _merge_device_other_info(
+                    device.device_other_info, DeviceOtherInfo.from_dict(info)
+                )
             except (ValueError, TypeError):
                 _logger.debug("MowerStateReducer: failed to parse deviceOtherInfo property")
 
@@ -788,6 +792,8 @@ class MowerStateReducer(StateReducer):
             device.mower_state.internal_model = p.int_mod
         if p.bms_hardware_version:
             device.mower_state.battery_hardware = p.bms_hardware_version
+        if (other_info := p.device_other_info) is not None:
+            device.device_other_info = _merge_device_other_info(device.device_other_info, other_info)
 
         for attr, fw_type in (
             ("stm32_h7_version", "1"),
@@ -837,6 +843,23 @@ class MowerStateReducer(StateReducer):
             _logger.debug("MowerStateReducer: failed to apply networkInfo (mammotion)")
 
         return device
+
+
+def _merge_device_other_info(current: DeviceOtherInfo, incoming: DeviceOtherInfo) -> DeviceOtherInfo:
+    """Return *current* updated with every field *incoming* actually reported.
+
+    ``deviceOtherInfo`` is a partial payload like the rest of ``property/post``:
+    a device may omit keys it has nothing to say about, and firmware revisions
+    add and remove them. Every field is ``None`` when absent, so merging on
+    presence keeps a value an earlier post established instead of blanking it —
+    the same rule the scalar properties use (upstream #184).
+    """
+    merged = dataclasses.replace(current)
+    for f in dataclasses.fields(DeviceOtherInfo):
+        value = getattr(incoming, f.name)
+        if value is not None:
+            setattr(merged, f.name, value)
+    return merged
 
 
 def _apply_mower_fw_module(firmwares: DeviceFirmwares, fw_type: str, version: str) -> None:
