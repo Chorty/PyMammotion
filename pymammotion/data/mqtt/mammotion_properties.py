@@ -146,89 +146,140 @@ class NetworkInfo(DataClassORJSONMixin):
 
 @dataclass
 class DeviceOtherInfo(DataClassORJSONMixin):
-    """Miscellaneous diagnostic information reported in the ``deviceOtherInfo`` property."""
+    """Miscellaneous diagnostic information reported in the ``deviceOtherInfo`` property.
 
-    soc_up_time: Annotated[int, Alias("socUpTime")]
-    mcu_up_time: Annotated[int, Alias("mcuUpTime")]
-    soc_loads: Annotated[str, Alias("socLoads")]
-    soc_mem_free: Annotated[int, Alias("socMemFree")]
-    soc_mem_total: Annotated[int, Alias("socMemTotal")]
-    soc_mmc_life_time: Annotated[int, Alias("socMmcLifeTime")]
-    usb_dis_cnt: Annotated[int, Alias("usbDisCnt")]
-    soc_pstore: Annotated[int, Alias("socPstore")]
-    soc_coredump: Annotated[int, Alias("socCoredump")]
-    soc_tmp: Annotated[int, Alias("socTmp")]
-    mc_mcu: Annotated[str, Alias("mcMcu")]
-    i_msg_free: Annotated[int, Alias("iMsgFree")]
-    i_msg_limit: Annotated[int, Alias("iMsgLimit")]
-    i_msg_raw: Annotated[int, Alias("iMsgRaw")]
-    i_msg_prop: Annotated[int, Alias("iMsgprop")]
-    i_msg_serv: Annotated[int, Alias("iMsgServ")]
-    i_msg_info: Annotated[int, Alias("iMsgInfo")]
-    i_msg_warn: Annotated[int, Alias("iMsgWarn")]
-    i_msg_fault: Annotated[int, Alias("iMsgFault")]
-    i_msg_ota_stage: Annotated[int, Alias("iMsgOtaStage")]
-    i_msg_protobuf: Annotated[int, Alias("iMsgProtobuf")]
-    i_msg_notify: Annotated[int, Alias("iMsgNotify")]
-    i_msg_log_prog: Annotated[int, Alias("iMsgLogProg")]
-    i_msg_biz_req: Annotated[int, Alias("iMsgBizReq")]
-    i_msg_cfg_req: Annotated[int, Alias("iMsgCfgReq")]
-    i_msg_voice: Annotated[int, Alias("iMsgVoice")]
-    i_msg_warn_code: Annotated[int, Alias("iMsgWarnCode")]
-    pb_net: Annotated[int, Alias("pbNet")]
-    pb_sys: Annotated[int, Alias("pbSys")]
-    pb_nav: Annotated[int, Alias("pbNav")]
-    pb_local: Annotated[int, Alias("pbLocal")]
-    pb_plan: Annotated[int, Alias("pbPlan")]
-    pb_e_drv: Annotated[int, Alias("pbEDrv")]
-    pb_e_sys: Annotated[int, Alias("pbESys")]
-    pb_midware: Annotated[int, Alias("pbMidware")]
-    pb_ota: Annotated[int, Alias("pbOta")]
-    pb_appl: Annotated[int, Alias("pbAppl")]
-    pb_mul: Annotated[int, Alias("pbMul")]
-    pb_other: Annotated[int, Alias("pbOther")]
-    lora_connect: Annotated[int, Alias("loraConnect")]
-    base_status: Annotated[int, Alias("Basestatus")]
-    mqtt_rtk_switch: int
-    mqtt_rtk_channel: int
-    mqtt_rtk_status: int
-    mqtt_rtcm_cnt: int
-    mqtt_conn_cnt: int
-    mqtt_disconn_cnt: int
-    mqtt_rtk_hb_flag: int
-    mqtt_rtk_hb_count: int
-    mqtt_start_cnt: int
-    mqtt_close_cnt: int
-    mqtt_rtk_ssl_fail: int
-    mqtt_rtk_wifi_config: int
-    nrtk_svc_prov: int
-    nrtk_svc_err: int
-    base_stn_id: int
-    rtk_status: int
-    charge_status: int
-    chassis_state: int
-    nav: str
-    ins_fusion: str
-    perception: str
-    vision_proxy: str
-    vslam_vio: str
-    iot_con_timeout: int
-    iot_con: int
-    iot_con_fail_max: str
-    iot_con_fail_min: Annotated[str, Alias("iot_con_fail_min")]
-    iot_url_count: int
-    iot_url_max: str
-    iot_url_min: str
-    iot_cn: int
-    iot_ap: int
-    iot_us: int
-    iot_eu: int
-    task_area: float
-    task_count: int
-    task_hash: str
-    systemio_boot_time: Annotated[str, Alias("systemioBootTime")]
-    dds_no_gdc: int
-    tilt_degree: str = ""
+    Every field is optional and defaults to ``None`` meaning "not reported in this
+    post", so a device that omits a key (or a firmware that adds one later) does
+    not raise ``MissingField`` and take the whole ``property/post`` down with it.
+    ``None`` also lets :class:`MowerStateReducer` merge successive posts without a
+    missing key clobbering a value an earlier post established.
+    """
+
+    soc_up_time: Annotated[int | None, Alias("socUpTime")] = None
+    mcu_up_time: Annotated[int | None, Alias("mcuUpTime")] = None
+    soc_loads: Annotated[str | None, Alias("socLoads")] = None
+    soc_mem_free: Annotated[int | None, Alias("socMemFree")] = None
+    soc_mem_total: Annotated[int | None, Alias("socMemTotal")] = None
+    soc_mmc_life_time: Annotated[int | None, Alias("socMmcLifeTime")] = None
+    usb_dis_cnt: Annotated[int | None, Alias("usbDisCnt")] = None
+    soc_pstore: Annotated[int | None, Alias("socPstore")] = None
+    soc_coredump: Annotated[int | None, Alias("socCoredump")] = None
+    soc_tmp: Annotated[int | None, Alias("socTmp")] = None
+    mc_mcu: Annotated[str | None, Alias("mcMcu")] = None
+    i_msg_free: Annotated[int | None, Alias("iMsgFree")] = None
+    i_msg_limit: Annotated[int | None, Alias("iMsgLimit")] = None
+    i_msg_raw: Annotated[int | None, Alias("iMsgRaw")] = None
+    i_msg_prop: Annotated[int | None, Alias("iMsgprop")] = None
+    i_msg_serv: Annotated[int | None, Alias("iMsgServ")] = None
+    i_msg_info: Annotated[int | None, Alias("iMsgInfo")] = None
+    i_msg_warn: Annotated[int | None, Alias("iMsgWarn")] = None
+    i_msg_fault: Annotated[int | None, Alias("iMsgFault")] = None
+    i_msg_ota_stage: Annotated[int | None, Alias("iMsgOtaStage")] = None
+    i_msg_protobuf: Annotated[int | None, Alias("iMsgProtobuf")] = None
+    i_msg_notify: Annotated[int | None, Alias("iMsgNotify")] = None
+    i_msg_log_prog: Annotated[int | None, Alias("iMsgLogProg")] = None
+    i_msg_biz_req: Annotated[int | None, Alias("iMsgBizReq")] = None
+    i_msg_cfg_req: Annotated[int | None, Alias("iMsgCfgReq")] = None
+    i_msg_voice: Annotated[int | None, Alias("iMsgVoice")] = None
+    i_msg_warn_code: Annotated[int | None, Alias("iMsgWarnCode")] = None
+    pb_net: Annotated[int | None, Alias("pbNet")] = None
+    pb_sys: Annotated[int | None, Alias("pbSys")] = None
+    pb_nav: Annotated[int | None, Alias("pbNav")] = None
+    pb_local: Annotated[int | None, Alias("pbLocal")] = None
+    pb_plan: Annotated[int | None, Alias("pbPlan")] = None
+    pb_e_drv: Annotated[int | None, Alias("pbEDrv")] = None
+    pb_e_sys: Annotated[int | None, Alias("pbESys")] = None
+    pb_midware: Annotated[int | None, Alias("pbMidware")] = None
+    pb_ota: Annotated[int | None, Alias("pbOta")] = None
+    pb_appl: Annotated[int | None, Alias("pbAppl")] = None
+    pb_mul: Annotated[int | None, Alias("pbMul")] = None
+    pb_other: Annotated[int | None, Alias("pbOther")] = None
+    lora_connect: Annotated[int | None, Alias("loraConnect")] = None
+    base_status: Annotated[int | None, Alias("Basestatus")] = None
+    mqtt_rtk_switch: int | None = None
+    mqtt_rtk_channel: int | None = None
+    mqtt_rtk_status: int | None = None
+    mqtt_rtcm_cnt: int | None = None
+    mqtt_conn_cnt: int | None = None
+    mqtt_disconn_cnt: int | None = None
+    mqtt_rtk_hb_flag: int | None = None
+    mqtt_rtk_hb_count: int | None = None
+    mqtt_start_cnt: int | None = None
+    mqtt_close_cnt: int | None = None
+    mqtt_rtk_ssl_fail: int | None = None
+    mqtt_rtk_wifi_config: int | None = None
+    nrtk_svc_prov: int | None = None
+    nrtk_svc_err: int | None = None
+    base_stn_id: int | None = None
+    rtk_status: int | None = None
+    charge_status: int | None = None
+    chassis_state: int | None = None
+    nav: str | None = None
+    ins_fusion: str | None = None
+    perception: str | None = None
+    vision_proxy: str | None = None
+    vslam_vio: str | None = None
+    iot_con_timeout: int | None = None
+    iot_con: int | None = None
+    iot_con_fail_max: str | None = None
+    iot_con_fail_min: Annotated[str | None, Alias("iot_con_fail_min")] = None
+    iot_url_count: int | None = None
+    iot_url_max: str | None = None
+    iot_url_min: str | None = None
+    iot_cn: int | None = None
+    iot_ap: int | None = None
+    iot_us: int | None = None
+    iot_eu: int | None = None
+    task_area: float | None = None
+    task_count: int | None = None
+    task_hash: str | None = None
+    systemio_boot_time: Annotated[str | None, Alias("systemioBootTime")] = None
+    dds_no_gdc: int | None = None
+    tilt_degree: str | None = None
+
+    # --- Fields observed in real payloads that previously had no home. ---
+    # Per-subsystem core-dump counters. The firmware's coredump_handler.sh writes
+    # one core plus a .report sidecar per crash into /userdata/log/coredump, and
+    # agl_monitor_process.sh restarts the failed service; these are the counts
+    # that survive into the property post. soc_coredump above is the SoC total.
+    embed_coredump: Annotated[int | None, Alias("embedCoredump")] = None
+    nav_coredump: Annotated[int | None, Alias("navCoredump")] = None
+    perception_coredump: Annotated[int | None, Alias("perceptionCoredump")] = None
+    location_coredump: Annotated[int | None, Alias("locationCoredump")] = None
+    other_coredump: Annotated[int | None, Alias("otherCoredump")] = None
+    # agl_monitor_process.sh's boot-local /tmp/restart_count. -1 == not yet set.
+    process_restart_count: int | None = None
+
+    # Tilt, reported as decimal-degree strings alongside the existing tilt_degree.
+    cur_tilt_degree: str | None = None
+    max_work_tilt_degree: str | None = None
+
+    # Network-RTK (NTRIP-style correction service) counters.
+    nrtk_account_ready: int | None = None
+    nrtk_freq: int | None = None
+    nrtk_low_power: int | None = None
+    nrtk_mountpoint: str | None = None
+    nrtk_password_err: int | None = None
+    nrtk_rate: int | None = None
+    nrtk_req_cnt: int | None = None
+    nrtk_req_flood: int | None = None
+    nrtk_rtcm_bytes: int | None = None
+    nrtk_rtcm_lose: int | None = None
+    nrtk_traffic_limit: int | None = None
+    nrtk_url: str | None = None
+
+    # RTK transport selection and mobile-network/Wi-Fi switch counters.
+    mqtt_net_choice: int | None = None
+    rtk_mnet_to_wifi: int | None = None
+    rtk_wifi_to_mnet: int | None = None
+
+    # Map-switch error counters, keyed by the device's own error numbers.
+    map_switch_err_101: int | None = None
+    map_switch_err_102: int | None = None
+    map_switch_err_103: int | None = None
+    map_switch_err_104: int | None = None
+    map_switch_err_105: int | None = None
+    map_switch_err_106: int | None = None
 
     class Config(BaseConfig):
         """Mashumaro config: accept both aliased and raw field names on deserialize."""

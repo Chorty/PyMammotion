@@ -18,6 +18,7 @@ from pymammotion.data.model.pool_state import PoolMap, PoolPlan, PoolState
 from pymammotion.data.model.report_info import BaseScore, ReportData, WorkSessionResult
 from pymammotion.data.model.work import CurrentTaskSettings
 from pymammotion.data.mqtt.event import ThingEventMessage
+from pymammotion.data.mqtt.mammotion_properties import DeviceOtherInfo
 from pymammotion.data.mqtt.properties import ThingPropertiesMessage
 from pymammotion.data.mqtt.status import ThingStatusMessage
 from pymammotion.http.model.http import CheckDeviceVersion
@@ -81,6 +82,7 @@ class MowerDevice(Device):
     non_work_hours: DeviceNonWorkingHours = field(default_factory=DeviceNonWorkingHours)
     events: Events = field(default_factory=Events)
     work_session_result: WorkSessionResult = field(default_factory=WorkSessionResult)
+    device_other_info: DeviceOtherInfo = field(default_factory=DeviceOtherInfo)
 
     @property
     def device_limits(self) -> DeviceLimits:
