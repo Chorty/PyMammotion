@@ -3,7 +3,8 @@ name: Publish to PyPI
 on:
   push:
     tags:
-      - 'v*'  # Trigger on version tags
+      - 'v*'
+      - 'chorty-*'  # Fork builds: GitHub release only, never PyPI.
 
 jobs:
   test:
@@ -51,7 +52,9 @@ jobs:
       - name: Check package version matches tag
         run: |
           PACKAGE_VERSION=$(uv run python -c "import importlib.metadata; print(importlib.metadata.version('pymammotion'))")
-          TAG_VERSION=${GITHUB_REF#refs/tags/v}
+          TAG_NAME=${GITHUB_REF#refs/tags/}
+          TAG_VERSION=${TAG_NAME#chorty-}
+          TAG_VERSION=${TAG_VERSION#v}
           if [ "$PACKAGE_VERSION" != "$TAG_VERSION" ]; then
             echo "Package version ($PACKAGE_VERSION) does not match tag version ($TAG_VERSION)"
             exit 1
@@ -69,6 +72,7 @@ jobs:
         run: uv build
 
       - name: Publish package distributions to PyPI
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           verbose: true
