@@ -36,20 +36,30 @@ def _property_post(device_other_info: str) -> str:
 def test_luba_mini_awd_lidar_other_info_parses() -> None:
     """The Luba mini AWD LiDAR omits ``ins_fusion`` and ``vslam_vio``; both were required (#189)."""
     info = DeviceOtherInfo.from_json(LIDAR_OTHER_INFO)
-    assert info.ins_fusion == ""
-    assert info.vslam_vio == ""
+    assert info.ins_fusion is None
+    assert info.vslam_vio is None
     assert info.soc_up_time == 297340
 
 
 @pytest.mark.regression
 def test_unparseable_diagnostics_blob_does_not_drop_the_post() -> None:
-    """A diagnostics key this model lacks used to fail the whole message, not just the blob."""
+    """A diagnostics blob that fails to decode used to fail the whole message, not just the blob."""
     blob = json.loads(LIDAR_OTHER_INFO)
-    del blob["socUpTime"]
+    blob["socUpTime"] = "not-a-number"
     msg = MammotionPropertiesMessage.from_json(_property_post(json.dumps(blob)))
     assert msg.params.battery_percentage == 31
     assert msg.params.device_state == 13
     assert msg.params.device_other_info is None
+
+
+def test_diagnostics_blob_missing_a_key_is_kept() -> None:
+    """Every field is optional, so a firmware that omits one key keeps the rest of the blob."""
+    blob = json.loads(LIDAR_OTHER_INFO)
+    del blob["socUpTime"]
+    msg = MammotionPropertiesMessage.from_json(_property_post(json.dumps(blob)))
+    assert msg.params.device_other_info is not None
+    assert msg.params.device_other_info.soc_up_time is None
+    assert msg.params.device_other_info.tilt_degree == "43.10"
 
 
 def test_parseable_diagnostics_blob_is_kept() -> None:
@@ -62,7 +72,7 @@ def test_parseable_diagnostics_blob_is_kept() -> None:
 def test_unparseable_diagnostics_object_does_not_drop_the_post() -> None:
     """The same tolerance covers the blob sent as a JSON object rather than a string."""
     blob = json.loads(LIDAR_OTHER_INFO)
-    del blob["socUpTime"]
+    blob["socUpTime"] = "not-a-number"
     post = json.loads(_property_post(""))
     post["params"]["deviceOtherInfo"] = blob
     msg = MammotionPropertiesMessage.from_json(json.dumps(post))

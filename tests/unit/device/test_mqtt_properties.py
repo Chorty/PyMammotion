@@ -229,7 +229,7 @@ def test_yuka_mini2_property_post_parses() -> None:
     assert p.bms_version == ""
     assert p.network_info.ip == ""
     assert p.network_info.apn_num == 0
-    assert p.device_other_info.tilt_degree == ""
+    assert p.device_other_info.tilt_degree is None
 
     # Fields the device *does* report still populate (incl. the previously typo'd alias).
     assert p.network_info.wifi_rssi == -65
