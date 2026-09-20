@@ -5,12 +5,20 @@ on:
     tags:
       - 'v*'
       - 'chorty-*'  # Fork builds: GitHub release only, never PyPI.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Version tag to build and release"
+        required: true
+        type: string
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
@@ -35,6 +43,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -52,7 +62,7 @@ jobs:
       - name: Check package version matches tag
         run: |
           PACKAGE_VERSION=$(uv run python -c "import importlib.metadata; print(importlib.metadata.version('pymammotion'))")
-          TAG_NAME=${GITHUB_REF#refs/tags/}
+          TAG_NAME="${{ inputs.tag || github.ref_name }}"
           TAG_VERSION=${TAG_NAME#chorty-}
           TAG_VERSION=${TAG_VERSION#v}
           if [ "$PACKAGE_VERSION" != "$TAG_VERSION" ]; then
@@ -72,7 +82,7 @@ jobs:
         run: uv build
 
       - name: Publish package distributions to PyPI
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(inputs.tag || github.ref_name, 'v')
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           verbose: true
@@ -81,6 +91,7 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
           files: dist/*
           generate_release_notes: true
         env:
