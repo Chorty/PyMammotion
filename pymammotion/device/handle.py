@@ -1569,8 +1569,40 @@ class DeviceHandle:
                     exc_info=True,
                 )
 
+    def _connected_ble_fallback(self, failed_transport_type: TransportType) -> Transport | None:
+        """Return an already-connected BLE transport to retry *failed_transport_type* on, or None.
+
+        This is the MQTT-side mirror of the existing BLE->MQTT fallback in
+        ``send_raw``: a cloud send that fails (rate-limited, throttled by the
+        cloud, or a generic ``TransportError``) retries over BLE when one is
+        already connected, rather than failing outright while a working local
+        link sits unused. Returns ``None`` immediately when the transport that
+        just failed *was* BLE -- there is nothing to mirror onto.
+
+        Deliberately checks ``is_connected``, not ``is_usable``: this mirrors
+        ``_on_device_offline``/``_on_device_unbound``, which use the same
+        gate. A failed cloud send must not be delayed by kicking off a fresh
+        GATT connect attempt (``BLETransport.connect()`` can take seconds and
+        can itself fail) -- only a link that is already up is used.
+        """
+        if failed_transport_type is TransportType.BLE:
+            return None
+        ble = self._transports.get(TransportType.BLE)
+        if ble is not None and ble.is_connected:
+            return ble
+        return None
+
     async def send_raw(self, payload: bytes, *, prefer_ble: bool | None = None) -> None:
-        """Send raw bytes via the best available transport, with BLE fallback on offline."""
+        """Send raw bytes via the best available transport, with BLE fallback on failure.
+
+        The fallback is now bidirectional. A BLE send that fails retries over
+        MQTT when one is usable (unchanged). A cloud send that fails --
+        rate-limited pre-check, a cloud 429, or a generic transport error --
+        now also retries over BLE when one is already connected, via
+        :meth:`_connected_ble_fallback`. Previously only the BLE->MQTT
+        direction existed, so a transient cloud failure could drop a command
+        outright even while a perfectly usable BLE link was connected.
+        """
         _logger.debug(
             "send_raw '%s': %d bytes prefer_ble=%s transports=%s",
             self.device_name,
@@ -1611,10 +1643,31 @@ class DeviceHandle:
         try:
             await self._send_marked(transport, payload)
         except TransportRateLimitedError:
-            _logger.debug("send_raw '%s': transport rate-limited — send blocked", self.device_name)
+            ble = self._connected_ble_fallback(transport.transport_type)
+            if ble is not None:
+                _logger.debug(
+                    "send_raw '%s': %s rate-limited — falling back to connected BLE",
+                    self.device_name,
+                    transport.transport_type.value,
+                )
+                await self._send_marked(ble, payload)
+            else:
+                _logger.debug("send_raw '%s': transport rate-limited — send blocked", self.device_name)
         except TooManyRequestsException:
-            _logger.warning("send_raw '%s': rate limited by cloud — blocking MQTT sends for 12h", self.device_name)
+            # Always record the ban, regardless of whether a BLE fallback exists —
+            # it is real cloud state, not a routing decision.
             transport.set_rate_limited()
+            ble = self._connected_ble_fallback(transport.transport_type)
+            if ble is not None:
+                _logger.warning(
+                    "send_raw '%s': rate limited by cloud — blocking MQTT sends for 12h, falling back to BLE",
+                    self.device_name,
+                )
+                await self._send_marked(ble, payload)
+            else:
+                _logger.warning(
+                    "send_raw '%s': rate limited by cloud — blocking MQTT sends for 12h", self.device_name
+                )
         except DeviceOfflineException:
             ble = self._on_device_offline(transport)
             if ble is None:
@@ -1626,21 +1679,30 @@ class DeviceHandle:
                 raise
             await self._send_marked(ble, payload)
         except TransportError:
-            if transport.transport_type is not TransportType.BLE:
-                raise
-            mqtt = self._pick_cloud_transport()
-            if mqtt is None or not self._cloud_transport_usable(mqtt):
-                _logger.warning(
-                    "Device '%s' BLE send failed and no usable MQTT transport available — giving up",
+            if transport.transport_type is TransportType.BLE:
+                mqtt = self._pick_cloud_transport()
+                if mqtt is None or not self._cloud_transport_usable(mqtt):
+                    _logger.warning(
+                        "Device '%s' BLE send failed and no usable MQTT transport available — giving up",
+                        self.device_name,
+                    )
+                    raise
+                _logger.debug(
+                    "Device '%s' BLE send failed — falling back to %s",
                     self.device_name,
+                    mqtt.transport_type.value,
                 )
+                await self._send_marked(mqtt, payload)
+                return
+            ble = self._connected_ble_fallback(transport.transport_type)
+            if ble is None:
                 raise
             _logger.debug(
-                "Device '%s' BLE send failed — falling back to %s",
+                "Device '%s' %s send failed — falling back to connected BLE",
                 self.device_name,
-                mqtt.transport_type.value,
+                transport.transport_type.value,
             )
-            await self._send_marked(mqtt, payload)
+            await self._send_marked(ble, payload)
 
     # ------------------------------------------------------------------
     # Error bus
