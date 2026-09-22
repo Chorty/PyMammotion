@@ -2278,8 +2278,33 @@ class DeviceHandle:
                     exc_info=True,
                 )
 
+    def _connected_ble_fallback(self, failed_transport_type: TransportType) -> Transport | None:
+        """Return an already-connected BLE transport to retry *failed_transport_type* on, or None.
+
+        The cloud-side mirror of the BLE->MQTT fallback in :meth:`send_raw`: a cloud
+        send that fails (rate-limit pre-check, a cloud 429, or a generic
+        ``TransportError``) retries over BLE when one is already connected, rather
+        than failing while a working local link sits unused.  ``None`` when the
+        transport that just failed *was* BLE -- there is nothing to mirror onto.
+
+        Checks ``is_connected``, not ``is_usable``, like ``_on_device_offline`` and
+        ``_on_device_unbound``: a failed cloud send must not wait on a fresh GATT
+        connect, which can take seconds and can itself fail.
+        """
+        if failed_transport_type is TransportType.BLE:
+            return None
+        ble = self._transports.get(TransportType.BLE)
+        if ble is not None and ble.is_connected:
+            return ble
+        return None
+
     async def send_raw(self, payload: bytes, *, prefer_ble: bool | None = None, user_initiated: bool = False) -> None:
-        """Send raw bytes via the best available transport, with BLE fallback on offline.
+        """Send raw bytes via the best available transport, with BLE fallback on failure.
+
+        The fallback runs both ways.  A BLE send that fails retries over a usable
+        cloud transport.  A cloud send that fails -- rate-limit pre-check, a cloud
+        429, or a generic transport error -- retries over BLE when one is already
+        connected (:meth:`_connected_ble_fallback`).
 
         Raises rather than returning when the payload could not be handed to a
         transport — including the rate-limit refusals, which the command queue
@@ -2338,7 +2363,13 @@ class DeviceHandle:
             _logger.warning("send_raw '%s': rate limited by cloud — blocking MQTT sends for 12h", self.device_name)
             if isinstance(transport, CloudTransport):
                 transport.set_rate_limited()
-            raise
+            # The ban is armed either way (it is real cloud state); only the payload
+            # can still go, over a BLE link that is already up.
+            ble = self._connected_ble_fallback(transport.transport_type)
+            if ble is None:
+                raise
+            _logger.warning("send_raw '%s': falling back to connected BLE after the cloud 429", self.device_name)
+            await self._send_marked(ble, payload, user_initiated=user_initiated)
         except DeviceOfflineException:
             ble = self._on_device_offline(transport)
             if ble is None:
@@ -2351,7 +2382,17 @@ class DeviceHandle:
             await self._send_marked(ble, payload, user_initiated=user_initiated)
         except TransportError:
             if transport.transport_type is not TransportType.BLE:
-                raise
+                # Includes TransportRateLimitedError, the rate-limit pre-check.
+                ble = self._connected_ble_fallback(transport.transport_type)
+                if ble is None:
+                    raise
+                _logger.debug(
+                    "Device '%s' %s send failed — falling back to connected BLE",
+                    self.device_name,
+                    transport.transport_type.value,
+                )
+                await self._send_marked(ble, payload, user_initiated=user_initiated)
+                return
             mqtt = self._pick_cloud_transport()
             if mqtt is None or not self._cloud_transport_usable(mqtt, user_initiated=user_initiated):
                 _logger.warning(
