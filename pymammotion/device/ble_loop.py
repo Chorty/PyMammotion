@@ -168,6 +168,10 @@ async def ble_polling_loop(handle: DeviceHandle) -> None:
             if ble is None or not ble.is_connected:
                 break
 
+            if handle.exclusive_report_subscription_active is True:
+                await asyncio.sleep(0.1)
+                continue
+
             mode = handle.device_mode()
             ble_interval = _BLE_POLL_INTERVAL[mode]
 
