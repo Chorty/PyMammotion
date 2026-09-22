@@ -679,7 +679,7 @@ import pytest
 from pymammotion.aliyun.exceptions import TooManyRequestsException
 from pymammotion.device.handle import DeviceHandle
 from pymammotion.device.mqtt_loop import _RATE_LIMITED_BACKOFF
-from pymammotion.transport.base import Transport, TransportRateLimitedError, TransportType
+from pymammotion.transport.base import Transport, TransportError, TransportRateLimitedError, TransportType
 
 
 # ---------------------------------------------------------------------------
@@ -702,6 +702,22 @@ def _make_rl_handle() -> DeviceHandle:
         device_name="Luba-RL",
         initial_device=_make_mowing_device(),
     )
+
+
+def _make_ble_transport(*, connected: bool = True) -> MagicMock:
+    ble = MagicMock()
+    ble.transport_type = TransportType.BLE
+    ble.is_connected = connected
+    ble.is_usable = connected
+    ble.is_rate_limited = False
+    ble.send = AsyncMock()
+    ble.set_rate_limited = MagicMock()
+    ble.disconnect = AsyncMock()
+    ble.on_message = None
+    ble.add_availability_listener = MagicMock()
+    ble.last_received_monotonic = 0.0
+    ble.last_send_monotonic = 0.0
+    return ble
 
 
 def _make_mqtt_transport(*, connected: bool = True) -> MagicMock:
@@ -951,6 +967,146 @@ async def test_send_raw_guard_does_not_call_set_rate_limited_again() -> None:
 
     mqtt.set_rate_limited.assert_not_called()
     mqtt.send.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# MQTT->BLE fallback (mirrors the existing BLE->MQTT fallback above) — applies
+# to every send_raw() caller uniformly, including motion dispatch, which also
+# goes through send_raw()/send_command_with_args(); nothing here is
+# motion-aware or motion-exempt.
+# ---------------------------------------------------------------------------
+
+
+# NOTE on all three "falls back" tests below: active_transport() always
+# selects a *connected* BLE over MQTT (rule 1), so MQTT can only be the
+# transport actually passed to _send_marked() when BLE was NOT yet connected
+# at selection time. Each test therefore starts BLE disconnected (so MQTT is
+# selected, exactly as in real routing) and flips it to connected inside the
+# failing send — modelling BLE finishing its background reconnect while the
+# doomed MQTT send is in flight. This mirrors
+# test_ble_fallback_used_when_mqtt_offline's existing pattern exactly, just
+# for the opposite direction.
+
+
+async def test_send_raw_falls_back_to_ble_when_mqtt_send_blocked() -> None:
+    """A pre-check TransportRateLimitedError on MQTT retries over BLE once BLE is connected."""
+    handle = _make_rl_handle()
+    mqtt = _make_mqtt_transport()
+    ble = _make_ble_transport(connected=False)
+    handle._transports[TransportType.CLOUD_ALIYUN] = mqtt  # noqa: SLF001
+    handle._transports[TransportType.BLE] = ble  # noqa: SLF001
+
+    call_count = 0
+
+    async def _send_marked_side_effect(transport: object, payload: bytes) -> None:  # noqa: ARG001
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            ble.is_connected = True  # BLE finishes reconnecting mid-send
+            raise TransportRateLimitedError("blocked")
+        # second call (BLE) succeeds
+
+    handle._send_marked = AsyncMock(side_effect=_send_marked_side_effect)  # type: ignore[method-assign]
+
+    await handle.send_raw(b"\x01")
+
+    assert handle._send_marked.call_count == 2
+    assert handle._send_marked.await_args_list[0].args[0] is mqtt
+    assert handle._send_marked.await_args_list[1].args[0] is ble
+
+
+async def test_send_raw_falls_back_to_ble_on_429() -> None:
+    """A cloud 429 (TooManyRequestsException) retries over BLE once BLE is connected,
+    and still calls set_rate_limited() regardless of the fallback."""
+    handle = _make_rl_handle()
+    mqtt = _make_mqtt_transport()
+    ble = _make_ble_transport(connected=False)
+    handle._transports[TransportType.CLOUD_ALIYUN] = mqtt  # noqa: SLF001
+    handle._transports[TransportType.BLE] = ble  # noqa: SLF001
+
+    call_count = 0
+
+    async def _send_marked_side_effect(transport: object, payload: bytes) -> None:  # noqa: ARG001
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            ble.is_connected = True
+            raise TooManyRequestsException("rate limited", "iot-id")
+
+    handle._send_marked = AsyncMock(side_effect=_send_marked_side_effect)  # type: ignore[method-assign]
+
+    await handle.send_raw(b"\x00")
+
+    mqtt.set_rate_limited.assert_called_once()
+    assert handle._send_marked.call_count == 2
+    assert handle._send_marked.await_args_list[1].args[0] is ble
+
+
+async def test_send_raw_falls_back_to_ble_on_generic_mqtt_transport_error() -> None:
+    """A generic TransportError from MQTT retries over BLE once BLE is connected —
+    the mirror image of the existing BLE-send-failed-falls-back-to-MQTT case."""
+    handle = _make_rl_handle()
+    mqtt = _make_mqtt_transport()
+    ble = _make_ble_transport(connected=False)
+    handle._transports[TransportType.CLOUD_ALIYUN] = mqtt  # noqa: SLF001
+    handle._transports[TransportType.BLE] = ble  # noqa: SLF001
+
+    call_count = 0
+
+    async def _send_marked_side_effect(transport: object, payload: bytes) -> None:  # noqa: ARG001
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            ble.is_connected = True
+            raise TransportError("cloud publish failed")
+
+    handle._send_marked = AsyncMock(side_effect=_send_marked_side_effect)  # type: ignore[method-assign]
+
+    await handle.send_raw(b"\x00")
+
+    assert handle._send_marked.call_count == 2
+    assert handle._send_marked.await_args_list[0].args[0] is mqtt
+    assert handle._send_marked.await_args_list[1].args[0] is ble
+
+
+async def test_send_raw_no_ble_fallback_when_ble_stays_disconnected() -> None:
+    """A cloud failure does NOT fall back when BLE never connects during the attempt —
+    matches the existing BLE->MQTT fallback's is_connected gate, not is_usable."""
+    handle = _make_rl_handle()
+    mqtt = _make_mqtt_transport()
+    mqtt.send = AsyncMock(side_effect=TooManyRequestsException("rate limited", "iot-id"))
+    ble = _make_ble_transport(connected=False)  # usable (cached device) but never connects
+    handle._transports[TransportType.CLOUD_ALIYUN] = mqtt  # noqa: SLF001
+    handle._transports[TransportType.BLE] = ble  # noqa: SLF001
+
+    await handle.send_raw(b"\x00")
+
+    ble.send.assert_not_awaited()
+    mqtt.set_rate_limited.assert_called_once()
+
+
+async def test_send_raw_rate_limit_silently_dropped_with_no_ble_present() -> None:
+    """Preserves prior behaviour: a rate-limited send with no BLE transport at all
+    is still silently dropped, not raised — no caller-visible behaviour change
+    for devices with no BLE transport registered."""
+    handle = _make_rl_handle()
+    mqtt = _make_mqtt_transport()
+    mqtt.is_rate_limited = True
+    mqtt.is_send_blocked = MagicMock(return_value=True)
+    handle._transports[TransportType.CLOUD_ALIYUN] = mqtt  # noqa: SLF001
+
+    await handle.send_raw(b"\x01")  # must not raise
+
+    mqtt.send.assert_not_awaited()
+
+
+def test_connected_ble_fallback_returns_none_when_failed_transport_is_ble() -> None:
+    """_connected_ble_fallback() must not mirror onto itself when BLE was the one that failed."""
+    handle = _make_rl_handle()
+    ble = _make_ble_transport(connected=True)
+    handle._transports[TransportType.BLE] = ble  # noqa: SLF001
+
+    assert handle._connected_ble_fallback(TransportType.BLE) is None  # noqa: SLF001
 
 
 # ===========================================================================
