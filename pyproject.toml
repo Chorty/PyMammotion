@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pymammotion"
-version = "0.9.6"
+version = "0.9.6.post1"
 description = ""
 authors = [
     { name = "Michael Arthur", email = "michael@jumblesoft.co.nz" },
