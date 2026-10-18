@@ -214,8 +214,9 @@ class ShareNotification(DataClassORJSONMixin):
     record_id: Annotated[str, Alias("recordId")]
     initiator_identity_id: Annotated[str, Alias("initiatorIdentityId")]
     is_receiver: Annotated[int, Alias("isReceiver")]
-    initiator_alias: Annotated[str, Alias("initiatorAlias")]
     status: int
+    # Display-only; absent on some records (seen on accepted and expired shares)
+    initiator_alias: Annotated[str | None, Alias("initiatorAlias")] = None
     # Absent on pending/not-yet-accepted share records (e.g. status=6)
     description: str | None = None
     # Absent on expired (status=3) share records
