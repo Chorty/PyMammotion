@@ -360,7 +360,9 @@ class HomeAssistantMowerApi:
         """Start (or stop) the continuous device report stream.
 
         Delegates to :meth:`MammotionClient.request_iot_sync_continuous`, which
-        owns the canonical channel list (``_CONTINUOUS_STREAM_CHANNELS``).
+        owns the canonical channel list (``_CONTINUOUS_STREAM_CHANNELS``); with
+        ``stop=True`` that sends the count=1 stop of
+        :meth:`MammotionClient.request_iot_sync_continuous_stop`.
         """
         await self._mammotion.request_iot_sync_continuous(device_name, stop=stop)
 

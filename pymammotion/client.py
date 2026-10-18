@@ -325,12 +325,20 @@ class MammotionClient(CloudAuthMixin):
         period: int = 1000,
         no_change_period: int = 4000,
     ) -> None:
-        """Start (or stop, via ``stop=True``) a continuous (count=0) report stream."""
+        """Start a continuous (count=0) report stream, or stop it with ``stop=True``.
+
+        ``stop=True`` delegates to :meth:`request_iot_sync_continuous_stop`, so every
+        public stop sends the same count=1 ``RPT_STOP`` body.  ``period`` and
+        ``no_change_period`` configure a START only and are ignored for a stop.
+        """
+        if stop:
+            await self.request_iot_sync_continuous_stop(device_name)
+            return
         await self.send_command_with_args(
             device_name,
             "request_iot_sys",
             _record_cmd=False,
-            rpt_act=RptAct.RPT_STOP if stop else RptAct.RPT_START,
+            rpt_act=RptAct.RPT_START,
             rpt_info_type=_CONTINUOUS_STREAM_CHANNELS,
             timeout=10000,
             period=period,
@@ -339,7 +347,13 @@ class MammotionClient(CloudAuthMixin):
         )
 
     async def request_iot_sync_continuous_stop(self, device_name: str) -> None:
-        """Explicit stop of the continuous stream — use before an exclusive saga."""
+        """Explicit stop of the continuous stream — use before an exclusive saga.
+
+        Sends ``RPT_STOP`` with ``count=1`` and the builder's default timing.  A
+        ``count=0`` stop was observed not to end the periodic stream; ``count=1`` was.
+        The device may still send a trailing report, and a stop is not proof that the
+        stored subscription was erased — a later START replaces it.
+        """
         await self.send_command_with_args(
             device_name,
             "request_iot_sys",
