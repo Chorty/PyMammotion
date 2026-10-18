@@ -36,6 +36,18 @@ class PendingRequest:
 
     expected_field: str
     future: asyncio.Future[Any]
+    #: Narrows the field match to this request's reply; ``None`` accepts any reply on the field.
+    match: Callable[[Any], bool] | None = None
+
+    def accepts(self, message: Any) -> bool:
+        """Return whether *message* answers this request; a failing matcher answers no."""
+        if self.match is None:
+            return True
+        try:
+            return bool(self.match(message))
+        except Exception:  # a matcher must never break inbound routing
+            _logger.debug("Reply matcher for '%s' failed; treating as unsolicited", self.expected_field, exc_info=True)
+            return False
 
 
 class DeviceMessageBroker:
@@ -74,6 +86,8 @@ class DeviceMessageBroker:
         expected_field: str,
         send_timeout: float = 3.0,
         retries: int = 2,
+        *,
+        match: Callable[[Any], bool] | None = None,
     ) -> Any:
         """Send a command and wait for the matching protobuf response.
 
@@ -82,6 +96,10 @@ class DeviceMessageBroker:
             expected_field: Protobuf oneof field name expected in response.
             send_timeout: Seconds to wait per attempt before retrying.
             retries: Total send attempts before raising CommandTimeoutError.
+                Each retry resends; pass 1 for a command that must not be replayed.
+            match: Optional predicate a reply on *expected_field* must also satisfy.
+                A reply it rejects is not consumed: it goes to the event bus as
+                unsolicited and the request keeps waiting.
 
         Returns:
             The LubaMsg response with the matching field set.
@@ -99,7 +117,7 @@ class DeviceMessageBroker:
             if expected_field in self._pending:
                 msg = f"Already waiting for '{expected_field}'"
                 raise ConcurrentRequestError(msg)
-            self._pending[expected_field] = PendingRequest(expected_field=expected_field, future=future)
+            self._pending[expected_field] = PendingRequest(expected_field=expected_field, future=future, match=match)
 
         try:
             for attempt in range(1, retries + 1):
@@ -184,7 +202,7 @@ class DeviceMessageBroker:
             # losing the response.
             async with self._lock:
                 pending = self._pending.get(field_name)
-                if pending is not None and not pending.future.done():
+                if pending is not None and not pending.future.done() and pending.accepts(message):
                     pending.future.set_result(message)
                     return  # solicited — do NOT emit to event bus
 

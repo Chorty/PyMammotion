@@ -74,6 +74,7 @@ from pymammotion.device.remote_drive import HttpTokenSource
 from pymammotion.device.state_reducer import apply_rtk_coordinate
 from pymammotion.http.model.http import CheckDeviceVersion, DeviceRecord, MQTTConnection, UnauthorizedExceptionError
 from pymammotion.http.model.rain_protection import WeatherServerSync
+from pymammotion.messaging.command_contract import contract_for
 from pymammotion.messaging.command_queue import Priority, execute_command
 from pymammotion.messaging.common_data_saga import CommonDataSaga
 from pymammotion.messaging.edge_saga import EdgeMappingSaga
@@ -87,6 +88,7 @@ from pymammotion.transport.aliyun_mqtt import AliyunMQTTConfig, AliyunMQTTTransp
 from pymammotion.transport.base import (
     AuthError,
     CommandRejectedError,
+    CommandResultError,
     CommandTimeoutError,
     NoTransportAvailableError,
     ReLoginRequiredError,
@@ -2741,9 +2743,14 @@ class MammotionClient(CloudAuthMixin):
                             changes here.
             **kwargs:       Arguments passed to the command builder.
 
+        The reply contract comes from :func:`~pymammotion.messaging.command_contract.contract_for`:
+        a command that can change physical state is sent once, never resent after an
+        ambiguous timeout, and a task-control ack must echo the sent type and action.
+
         Raises:
             KeyError:             if *name* is not a registered device.
             CommandTimeoutError:  if no response after retries.
+            CommandResultError:   a task-control ack carried a nonzero result (kept raw).
             TransportRateLimitedError: on a direct *priority*, if the send is refused
                 before it reaches the network (a cloud 429 ban).  On any other priority
                 the refusal is logged and dropped, and surfaces as ``CommandTimeoutError``.
@@ -2756,6 +2763,7 @@ class MammotionClient(CloudAuthMixin):
         handle.record_user_command()
         commands = handle.commands
         command_bytes: bytes = getattr(commands, key)(**kwargs)
+        contract = contract_for(key, expected_field, command_bytes)
         _session = self._get_session_for_handle(handle)
 
         async def _send() -> None:
@@ -2767,11 +2775,16 @@ class MammotionClient(CloudAuthMixin):
                 swallow_transport_errors=not priority.is_direct,
             )
 
-        return await handle.broker.send_and_wait(
+        reply = await handle.broker.send_and_wait(
             send_fn=_send,
             expected_field=expected_field,
             send_timeout=send_timeout,
+            retries=contract.attempts,
+            match=contract.match,
         )
+        if contract.result is not None and (result := contract.result(reply)) != 0:
+            raise CommandResultError(expected_field, result, reply)
+        return reply
 
     def set_prefer_ble(self, device_id: str, *, prefer_ble: bool, account_id: str | None = None) -> None:
         """Set transport preference for a registered device."""

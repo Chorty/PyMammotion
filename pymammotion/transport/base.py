@@ -10,7 +10,7 @@ import json
 import logging
 import socket
 import time
-from typing import TYPE_CHECKING, Generic, Self, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Self, TypeVar
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -43,6 +43,17 @@ class CommandTimeoutError(TransportError):
 
 class CommandRejectedError(TransportError):
     """The device answered, but refused the command (e.g. a batch set acked with ``RES_FAILURE``)."""
+
+
+class CommandResultError(CommandRejectedError):
+    """The matching reply carried a nonzero device result; the raw code and reply are kept."""
+
+    def __init__(self, expected_field: str, result: int, reply: Any) -> None:
+        """Store the field, the raw result and the reply, then format the message."""
+        self.expected_field = expected_field
+        self.result = result
+        self.reply = reply
+        super().__init__(f"'{expected_field}' answered with result {result}")
 
 
 class NoTransportAvailableError(TransportError):
